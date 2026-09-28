@@ -1,0 +1,18 @@
+[package]
+name = "bugparcel"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bugparcel"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+git-state = { path = "../../crates/git-state" }
+parcel-core = { path = "../../crates/parcel-core" }
+replay = { path = "../../crates/replay" }
+serde_json.workspace = true
+verify = { path = "../../crates/verify" }

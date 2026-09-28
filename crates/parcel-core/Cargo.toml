@@ -1,0 +1,10 @@
+[package]
+name = "parcel-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+ulid.workspace = true

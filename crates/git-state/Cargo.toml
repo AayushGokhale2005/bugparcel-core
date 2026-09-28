@@ -1,0 +1,8 @@
+[package]
+name = "git-state"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+parcel-core = { path = "../parcel-core" }

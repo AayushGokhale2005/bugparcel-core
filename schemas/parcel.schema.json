@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BugParcel manifest",
+  "type": "object",
+  "required": ["schema_version", "parcel_id", "status", "source", "reproduction"],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "parcel_id": { "type": "string", "pattern": "^bp_" },
+    "status": { "enum": ["draft", "captured", "reducing", "reproducing", "repro_failed", "reproducible", "shared", "fix_proposed", "verifying", "verified", "verify_failed"] }
+  }
+}
