@@ -64,3 +64,29 @@ MCP client configuration:
   }
 }
 ```
+
+## FastAPI adapter — Phase 2
+
+The Python adapter writes a sanitized request/error event and invokes the local
+CLI when FastAPI raises an unhandled exception. It is automatically disabled in
+isolated replays through `BUGPARCEL_REPLAY=1`.
+
+```python
+from pathlib import Path
+
+from bugparcel_fastapi import BugParcelFastAPIMiddleware, BugParcelSettings
+
+app.add_middleware(
+    BugParcelFastAPIMiddleware,
+    settings=BugParcelSettings(
+        project_root=Path("/path/to/your/fastapi-project"),
+        reproduction_command=["/path/to/.venv/bin/python", "-m", "pytest", "-q"],
+        parcel_store=Path("/path/to/bugparcel-store"),
+        cli_command=[
+            "cargo", "run", "--quiet", "--manifest-path",
+            "/Users/aayushgokhale/Documents/BugParcel/bugparcel-core/Cargo.toml",
+            "-p", "bugparcel", "--",
+        ],
+    ),
+)
+```

@@ -19,6 +19,7 @@ pub fn run(spec: &ReproductionSpec, worktree: &Path) -> Result<ReplayResult> {
     let output = Command::new(program)
         .args(args)
         .current_dir(worktree)
+        .env("BUGPARCEL_REPLAY", "1")
         .output()?;
     let observed_exit_code = output.status.code().unwrap_or(-1);
     let matched = observed_exit_code == spec.failure_assertion.expected_exit_code;
