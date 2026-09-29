@@ -18,6 +18,12 @@ enum Commands {
     Capture {
         #[arg(long)]
         name: String,
+        #[arg(long = "expect-output")]
+        expected_output_contains: Vec<String>,
+        #[arg(long, default_value_t = 1)]
+        expected_exit_code: i32,
+        #[arg(long)]
+        contract_file: Option<PathBuf>,
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -65,7 +71,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = root();
     match cli.command {
-        Commands::Capture { name, command } => {
+        Commands::Capture {
+            name,
+            expected_output_contains,
+            expected_exit_code,
+            contract_file,
+            command,
+        } => {
             let repo = env::current_dir()?;
             let state = git_state::capture(&repo).context("capture Git state")?;
             let mut manifest = Manifest::new(
@@ -73,7 +85,13 @@ fn main() -> Result<()> {
                 ReproductionSpec {
                     command,
                     failure_assertion: FailureAssertion {
-                        expected_exit_code: 1,
+                        expected_exit_code,
+                        expected_output_contains,
+                        context: contract_file
+                            .map(fs::read)
+                            .transpose()?
+                            .map(|bytes| serde_json::from_slice(&bytes))
+                            .transpose()?,
                     },
                 },
             );

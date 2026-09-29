@@ -59,7 +59,18 @@ class BugParcelFastAPIMiddleware(BaseHTTPMiddleware):
     def _capture(self, request: Request, error: Exception) -> None:
         event_path = self._write_event(request, error)
         name = f"fastapi-{request.method.lower()}-{uuid.uuid4().hex[:8]}"
-        command = [*self.settings.cli_command, "capture", "--name", name, "--", *self.settings.reproduction_command]
+        command = [
+            *self.settings.cli_command,
+            "capture",
+            "--name",
+            name,
+            "--expect-output",
+            type(error).__name__,
+            "--contract-file",
+            str(event_path),
+            "--",
+            *self.settings.reproduction_command,
+        ]
         environment = {**os.environ, "BUGPARCEL_HOME": str(self.settings.parcel_store)}
         completed = subprocess.run(
             command,
@@ -76,10 +87,13 @@ class BugParcelFastAPIMiddleware(BaseHTTPMiddleware):
             "capture_stdout": completed.stdout.strip(),
             "capture_stderr": completed.stderr.strip(),
         }
-        with event_path.open("a", encoding="utf-8") as handle:
-            handle.write("\n")
-            json.dump(receipt, handle, sort_keys=True)
-            handle.write("\n")
+        for token in completed.stdout.split():
+            if token.startswith("bp_"):
+                receipt["parcel_id"] = token
+                break
+        event = json.loads(event_path.read_text(encoding="utf-8"))
+        event["capture"] = receipt
+        event_path.write_text(json.dumps(event, indent=2, sort_keys=True), encoding="utf-8")
 
     def _write_event(self, request: Request, error: Exception) -> Path:
         events = self.settings.parcel_store / "fastapi-events"

@@ -10,7 +10,7 @@ The implementation workspace for BugParcel's local-first CLI and daemon-era core
 - Generic process reproduction with a stable exit-code assertion.
 - CLI workflow: `capture`, `show`, `reproduce`, and `verify`.
 
-This is the Phase 0–1 foundation from the technical specification. It does not yet implement cloud sharing, HTTP capture, MCP, or container isolation.
+This local-first foundation does not yet implement cloud sharing or container isolation.
 
 ```bash
 cargo run -p bugparcel -- capture --name "failing-auth" -- npm test -- auth
@@ -69,7 +69,8 @@ MCP client configuration:
 
 The Python adapter writes a sanitized request/error event and invokes the local
 CLI when FastAPI raises an unhandled exception. It is automatically disabled in
-isolated replays through `BUGPARCEL_REPLAY=1`.
+isolated replays through `BUGPARCEL_REPLAY=1`. Its captured contract requires
+both the expected exit code and the original exception type in command output.
 
 ```python
 from pathlib import Path

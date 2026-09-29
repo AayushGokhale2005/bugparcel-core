@@ -7,6 +7,7 @@ use std::{path::Path, process::Command};
 pub struct ReplayResult {
     pub observed_exit_code: i32,
     pub matched: bool,
+    pub mismatches: Vec<String>,
     pub stdout: String,
     pub stderr: String,
 }
@@ -22,12 +23,28 @@ pub fn run(spec: &ReproductionSpec, worktree: &Path) -> Result<ReplayResult> {
         .env("BUGPARCEL_REPLAY", "1")
         .output()?;
     let observed_exit_code = output.status.code().unwrap_or(-1);
-    let matched = observed_exit_code == spec.failure_assertion.expected_exit_code;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let combined_output = format!("{stdout}\n{stderr}");
+    let mut mismatches = Vec::new();
+    if observed_exit_code != spec.failure_assertion.expected_exit_code {
+        mismatches.push(format!(
+            "exit code mismatch: expected {}, observed {observed_exit_code}",
+            spec.failure_assertion.expected_exit_code
+        ));
+    }
+    for expected in &spec.failure_assertion.expected_output_contains {
+        if !combined_output.contains(expected) {
+            mismatches.push(format!("missing expected output fragment: {expected}"));
+        }
+    }
+    let matched = mismatches.is_empty();
     Ok(ReplayResult {
         observed_exit_code,
         matched,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        mismatches,
+        stdout,
+        stderr,
     })
 }
 

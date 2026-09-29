@@ -57,6 +57,10 @@ pub struct GitState {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FailureAssertion {
     pub expected_exit_code: i32,
+    #[serde(default)]
+    pub expected_output_contains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -159,6 +163,8 @@ mod tests {
                 command: vec!["false".into()],
                 failure_assertion: FailureAssertion {
                     expected_exit_code: 1,
+                    expected_output_contains: vec![],
+                    context: None,
                 },
             },
         );

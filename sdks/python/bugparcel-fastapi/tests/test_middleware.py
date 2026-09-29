@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,9 @@ def test_adapter_writes_redacted_event_and_preserves_exception(tmp_path: Path) -
 
     event_files = list((tmp_path / "store" / "fastapi-events").glob("*.json"))
     assert len(event_files) == 1
-    event = event_files[0].read_text(encoding="utf-8")
-    assert "Bearer secret" not in event
-    assert "keep-private" not in event
-    assert "[REDACTED]" in event
+    event = json.loads(event_files[0].read_text(encoding="utf-8"))
+    serialized = json.dumps(event)
+    assert "Bearer secret" not in serialized
+    assert "keep-private" not in serialized
+    assert "[REDACTED]" in serialized
+    assert event["error"]["type"] == "RuntimeError"
