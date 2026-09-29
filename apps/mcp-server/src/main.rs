@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use parcel_core::{Manifest, ParcelStatus};
+use parcel_core::{FailureAssertion, Manifest, ParcelStatus, ReproductionSpec, StateSnapshot};
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -63,6 +63,15 @@ fn tool_definitions() -> Value {
             }),
         ),
         tool(
+            "bugparcel_get_contract",
+            "Read only the replay contract: command, expected failure, captured state, fixtures, and environment.",
+            json!({
+                "type": "object",
+                "properties": {"parcel_id": {"type": "string"}},
+                "required": ["parcel_id"],
+            }),
+        ),
+        tool(
             "bugparcel_reproduce",
             "Reproduce a captured failure in a fresh detached Git worktree. This never changes the source branch.",
             json!({
@@ -83,6 +92,41 @@ fn tool_definitions() -> Value {
                 "required": ["parcel_id", "patch_path"],
             }),
         ),
+        tool(
+            "bugparcel_capture",
+            "Capture a failure from a local Git repository. The command runs later only in detached worktrees; capture itself does not execute it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repository_path": {"type": "string", "description": "Absolute local Git repository path."},
+                    "command": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "expected_output_contains": {"type": "array", "items": {"type": "string"}},
+                    "expected_exit_code": {"type": "integer", "default": 1},
+                    "environment": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "docker_image": {"type": "string"},
+                    "state": {"description": "Optional JSON state supplied to replay.", "type": "object"},
+                    "state_source": {"type": "string"},
+                },
+                "required": ["repository_path", "command"],
+            }),
+        ),
+        tool(
+            "bugparcel_reduce",
+            "Minimize captured JSON state while preserving the failure contract. Returns the reduced state without editing the source repository.",
+            json!({
+                "type": "object",
+                "properties": {"parcel_id": {"type": "string"}},
+                "required": ["parcel_id"],
+            }),
+        ),
+        tool(
+            "bugparcel_cleanup_worktrees",
+            "Remove only detached worktrees created by this local BugParcel store. Source repositories are never touched.",
+            json!({
+                "type": "object",
+                "properties": {"parcel_id": {"type": "string"}},
+            }),
+        ),
     ])
 }
 
@@ -98,6 +142,23 @@ fn argument<'a>(arguments: &'a Value, key: &str) -> Result<&'a str> {
         .get(key)
         .and_then(Value::as_str)
         .with_context(|| format!("missing required tool argument: {key}"))
+}
+
+fn string_list(arguments: &Value, key: &str) -> Result<Vec<String>> {
+    let values: Vec<String> = arguments
+        .get(key)
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(values)
+}
+
+fn string_map(arguments: &Value, key: &str) -> Result<std::collections::BTreeMap<String, String>> {
+    Ok(arguments
+        .get(key)
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?
+        .unwrap_or_default())
 }
 
 fn list_parcels(root: &Path) -> Result<Value> {
@@ -123,6 +184,72 @@ fn list_parcels(root: &Path) -> Result<Value> {
     }
     parcels.sort_by_key(|value| value["created_at"].as_str().map(str::to_owned));
     Ok(Value::Array(parcels))
+}
+
+fn contract(root: &Path, parcel_id: &str) -> Result<Value> {
+    let manifest = load(root, parcel_id)?;
+    Ok(json!({
+        "parcel_id": manifest.parcel_id.as_str(),
+        "status": manifest.status,
+        "command": manifest.reproduction.command,
+        "failure_assertion": manifest.reproduction.failure_assertion,
+        "environment": manifest.reproduction.environment,
+        "state": manifest.reproduction.state,
+    }))
+}
+
+fn capture(root: &Path, arguments: &Value) -> Result<Value> {
+    let repository = PathBuf::from(argument(arguments, "repository_path")?);
+    if !repository.is_absolute() {
+        anyhow::bail!("repository_path must be absolute");
+    }
+    let command = string_list(arguments, "command")?;
+    if command.is_empty() {
+        anyhow::bail!("command must contain at least one executable");
+    }
+    let environment_values = string_map(arguments, "environment")?
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>();
+    let state = arguments.get("state").cloned().map(|json| StateSnapshot {
+        source: arguments
+            .get("state_source")
+            .and_then(Value::as_str)
+            .unwrap_or("agent-provided JSON")
+            .to_owned(),
+        json,
+        fixtures: vec![],
+    });
+    let mut manifest = Manifest::new(
+        git_state::capture(&repository).context("capture Git state")?,
+        ReproductionSpec {
+            environment: environment::capture(
+                &repository,
+                &command,
+                &environment_values,
+                arguments
+                    .get("docker_image")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            )?,
+            command,
+            failure_assertion: FailureAssertion {
+                expected_exit_code: arguments
+                    .get("expected_exit_code")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1) as i32,
+                expected_output_contains: string_list(arguments, "expected_output_contains")?,
+                context: None,
+            },
+            state,
+        },
+    );
+    manifest.transition(
+        ParcelStatus::Captured,
+        Some("captured through local MCP".into()),
+    )?;
+    save(root, &manifest)?;
+    Ok(serde_json::to_value(manifest)?)
 }
 
 fn reproduce(root: &Path, parcel_id: &str) -> Result<Value> {
@@ -177,6 +304,59 @@ fn verify(root: &Path, parcel_id: &str, patch_path: &Path) -> Result<Value> {
     Ok(json!({"parcel": manifest, "verification": outcome_text, "worktree": worktree}))
 }
 
+fn reduce(root: &Path, parcel_id: &str) -> Result<Value> {
+    let manifest = load(root, parcel_id)?;
+    if manifest.status != ParcelStatus::Reproducible {
+        anyhow::bail!("REDUCE_REQUIRES_REPRODUCIBLE_PARCEL");
+    }
+    if manifest.reproduction.environment.container_image.is_some() {
+        anyhow::bail!("JSON_REDUCTION_WITH_DOCKER_IS_NOT_IMPLEMENTED_YET");
+    }
+    let state = manifest
+        .reproduction
+        .state
+        .as_ref()
+        .context("REDUCE_REQUIRES_CAPTURED_JSON_STATE")?;
+    let worktree = worktree_path(root, parcel_id, "mcp-reduce");
+    git_state::reconstruct(&manifest.source, &worktree)?;
+    let minimized = reducer::minimize(state.json.clone(), |candidate| {
+        replay::run_with_environment(
+            &manifest.reproduction,
+            &worktree,
+            &[("BUGPARCEL_STATE_JSON".into(), candidate.to_string())],
+        )
+        .is_ok_and(|result| result.matched)
+    });
+    Ok(json!({
+        "parcel_id": parcel_id,
+        "state_source": state.source,
+        "reduced_state": minimized,
+        "worktree": worktree,
+    }))
+}
+
+fn cleanup_worktrees(root: &Path, parcel_id: Option<&str>) -> Result<Value> {
+    let worktrees = root.join("worktrees");
+    if !worktrees.exists() {
+        return Ok(json!({"removed": []}));
+    }
+    let targets = if let Some(parcel_id) = parcel_id {
+        vec![worktrees.join(parcel_id)]
+    } else {
+        fs::read_dir(&worktrees)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect()
+    };
+    let mut removed = Vec::new();
+    for target in targets {
+        if target.exists() {
+            fs::remove_dir_all(&target)?;
+            removed.push(target);
+        }
+    }
+    Ok(json!({"removed": removed}))
+}
+
 fn call_tool(root: &Path, name: &str, arguments: &Value) -> Result<Value> {
     match name {
         "bugparcel_list_parcels" => Ok(text_result(list_parcels(root)?)),
@@ -184,6 +364,11 @@ fn call_tool(root: &Path, name: &str, arguments: &Value) -> Result<Value> {
             root,
             argument(arguments, "parcel_id")?,
         )?)?)),
+        "bugparcel_get_contract" => Ok(text_result(contract(
+            root,
+            argument(arguments, "parcel_id")?,
+        )?)),
+        "bugparcel_capture" => Ok(text_result(capture(root, arguments)?)),
         "bugparcel_reproduce" => Ok(text_result(reproduce(
             root,
             argument(arguments, "parcel_id")?,
@@ -192,6 +377,14 @@ fn call_tool(root: &Path, name: &str, arguments: &Value) -> Result<Value> {
             root,
             argument(arguments, "parcel_id")?,
             Path::new(argument(arguments, "patch_path")?),
+        )?)),
+        "bugparcel_reduce" => Ok(text_result(reduce(
+            root,
+            argument(arguments, "parcel_id")?,
+        )?)),
+        "bugparcel_cleanup_worktrees" => Ok(text_result(cleanup_worktrees(
+            root,
+            arguments.get("parcel_id").and_then(Value::as_str),
         )?)),
         _ => anyhow::bail!("unknown tool: {name}"),
     }
