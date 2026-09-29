@@ -24,6 +24,10 @@ enum Commands {
         expected_exit_code: i32,
         #[arg(long)]
         contract_file: Option<PathBuf>,
+        #[arg(long = "env")]
+        environment_values: Vec<String>,
+        #[arg(long)]
+        docker_image: Option<String>,
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -76,6 +80,8 @@ fn main() -> Result<()> {
             expected_output_contains,
             expected_exit_code,
             contract_file,
+            environment_values,
+            docker_image,
             command,
         } => {
             let repo = env::current_dir()?;
@@ -83,6 +89,12 @@ fn main() -> Result<()> {
             let mut manifest = Manifest::new(
                 state,
                 ReproductionSpec {
+                    environment: environment::capture(
+                        &repo,
+                        &command,
+                        &environment_values,
+                        docker_image,
+                    )?,
                     command,
                     failure_assertion: FailureAssertion {
                         expected_exit_code,

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -63,10 +64,36 @@ pub struct FailureAssertion {
     pub context: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PythonRuntime {
+    pub executable: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LockfileDigest {
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct EnvironmentSpec {
+    #[serde(default)]
+    pub variables: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python: Option<PythonRuntime>,
+    #[serde(default)]
+    pub lockfiles: Vec<LockfileDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_image: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReproductionSpec {
     pub command: Vec<String>,
     pub failure_assertion: FailureAssertion,
+    #[serde(default)]
+    pub environment: EnvironmentSpec,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -166,6 +193,7 @@ mod tests {
                     expected_output_contains: vec![],
                     context: None,
                 },
+                environment: EnvironmentSpec::default(),
             },
         );
         manifest.transition(ParcelStatus::Captured, None).unwrap();

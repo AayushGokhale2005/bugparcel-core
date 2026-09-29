@@ -72,6 +72,21 @@ CLI when FastAPI raises an unhandled exception. It is automatically disabled in
 isolated replays through `BUGPARCEL_REPLAY=1`. Its captured contract requires
 both the expected exit code and the original exception type in command output.
 
+## Environment isolation — Phase 4
+
+Every capture now records a Python runtime (when the repro command starts with
+Python), SHA-256 lockfile digests, and only explicitly allowlisted environment
+variables. Use `--env KEY=VALUE` to include a variable. Docker replay is
+optional: declare an image that already contains the runtime dependencies and
+BugParcel runs the reproduction in a network-isolated disposable container.
+
+```sh
+bugparcel capture --name checkout \
+  --env LOG_LEVEL=debug \
+  --docker-image ghcr.io/example/checkout-test:sha-abc123 \
+  -- python3 -m pytest -q
+```
+
 ```python
 from pathlib import Path
 

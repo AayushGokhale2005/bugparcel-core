@@ -17,11 +17,33 @@ pub fn run(spec: &ReproductionSpec, worktree: &Path) -> Result<ReplayResult> {
         .command
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("reproduction command cannot be empty"))?;
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(worktree)
-        .env("BUGPARCEL_REPLAY", "1")
-        .output()?;
+    let output = if let Some(image) = &spec.environment.container_image {
+        let workspace = worktree.canonicalize()?;
+        let mut command = Command::new("docker");
+        command
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--workdir",
+                "/workspace",
+            ])
+            .arg("--volume")
+            .arg(format!("{}:/workspace:rw", workspace.display()))
+            .args(["--env", "BUGPARCEL_REPLAY=1"]);
+        for (key, value) in &spec.environment.variables {
+            command.arg("--env").arg(format!("{key}={value}"));
+        }
+        command.arg(image).arg(program).args(args).output()?
+    } else {
+        Command::new(program)
+            .args(args)
+            .current_dir(worktree)
+            .envs(&spec.environment.variables)
+            .env("BUGPARCEL_REPLAY", "1")
+            .output()?
+    };
     let observed_exit_code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

@@ -1,0 +1,9 @@
+[package]
+name = "environment"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+parcel-core = { path = "../parcel-core" }
+sha2.workspace = true

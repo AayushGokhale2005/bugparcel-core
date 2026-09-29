@@ -68,6 +68,8 @@ class BugParcelFastAPIMiddleware(BaseHTTPMiddleware):
             type(error).__name__,
             "--contract-file",
             str(event_path),
+            "--env",
+            "BUGPARCEL_CAPTURED_FROM=fastapi",
             "--",
             *self.settings.reproduction_command,
         ]

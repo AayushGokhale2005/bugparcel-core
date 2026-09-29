@@ -11,6 +11,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+environment = { path = "../../crates/environment" }
 git-state = { path = "../../crates/git-state" }
 parcel-core = { path = "../../crates/parcel-core" }
 replay = { path = "../../crates/replay" }
