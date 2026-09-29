@@ -1,0 +1,13 @@
+{
+  "name": "bugparcel-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "bridge": "node server.mjs",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "^8.0.13"
+  }
+}
