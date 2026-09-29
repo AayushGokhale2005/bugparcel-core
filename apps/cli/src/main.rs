@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use parcel_core::{FailureAssertion, Manifest, ParcelStatus, ReproductionSpec};
+use parcel_core::{FailureAssertion, Manifest, ParcelStatus, ReproductionSpec, StateSnapshot};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -28,6 +28,10 @@ enum Commands {
         environment_values: Vec<String>,
         #[arg(long)]
         docker_image: Option<String>,
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+        #[arg(long, default_value = "/")]
+        state_json_pointer: String,
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -41,6 +45,11 @@ enum Commands {
         parcel_id: String,
         #[arg(long)]
         patch: PathBuf,
+    },
+    Reduce {
+        parcel_id: String,
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
@@ -82,6 +91,8 @@ fn main() -> Result<()> {
             contract_file,
             environment_values,
             docker_image,
+            state_file,
+            state_json_pointer,
             command,
         } => {
             let repo = env::current_dir()?;
@@ -105,6 +116,22 @@ fn main() -> Result<()> {
                             .map(|bytes| serde_json::from_slice(&bytes))
                             .transpose()?,
                     },
+                    state: state_file
+                        .map(|path| {
+                            let document: serde_json::Value =
+                                serde_json::from_slice(&fs::read(&path)?)?;
+                            let json = document
+                                .pointer(&state_json_pointer)
+                                .cloned()
+                                .with_context(|| {
+                                    format!("state JSON pointer not found: {state_json_pointer}")
+                                })?;
+                            Ok::<StateSnapshot, anyhow::Error>(StateSnapshot {
+                                source: path.display().to_string(),
+                                json,
+                            })
+                        })
+                        .transpose()?,
                 },
             );
             manifest.transition(
@@ -160,6 +187,32 @@ fn main() -> Result<()> {
             manifest.transition(next, Some(message.into()))?;
             save(&root, &manifest)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Commands::Reduce { parcel_id, output } => {
+            let manifest = load(&root, &parcel_id)?;
+            if manifest.status != ParcelStatus::Reproducible {
+                anyhow::bail!("REDUCE_REQUIRES_REPRODUCIBLE_PARCEL");
+            }
+            let state = manifest
+                .reproduction
+                .state
+                .as_ref()
+                .context("REDUCE_REQUIRES_CAPTURED_JSON_STATE")?;
+            if manifest.reproduction.environment.container_image.is_some() {
+                anyhow::bail!("JSON_REDUCTION_WITH_DOCKER_IS_NOT_IMPLEMENTED_YET");
+            }
+            let worktree = worktree_path(&root, &parcel_id, "reduce");
+            git_state::reconstruct(&manifest.source, &worktree)?;
+            let minimized = reducer::minimize(state.json.clone(), |candidate| {
+                replay::run_with_environment(
+                    &manifest.reproduction,
+                    &worktree,
+                    &[("BUGPARCEL_STATE_JSON".into(), candidate.to_string())],
+                )
+                .is_ok_and(|result| result.matched)
+            });
+            fs::write(&output, serde_json::to_vec_pretty(&minimized)?)?;
+            println!("{}", serde_json::to_string_pretty(&minimized)?);
         }
     }
     Ok(())

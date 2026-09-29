@@ -89,11 +89,19 @@ pub struct EnvironmentSpec {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StateSnapshot {
+    pub source: String,
+    pub json: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReproductionSpec {
     pub command: Vec<String>,
     pub failure_assertion: FailureAssertion,
     #[serde(default)]
     pub environment: EnvironmentSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<StateSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -194,6 +202,7 @@ mod tests {
                     context: None,
                 },
                 environment: EnvironmentSpec::default(),
+                state: None,
             },
         );
         manifest.transition(ParcelStatus::Captured, None).unwrap();

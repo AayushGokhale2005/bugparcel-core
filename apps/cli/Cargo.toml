@@ -15,5 +15,6 @@ environment = { path = "../../crates/environment" }
 git-state = { path = "../../crates/git-state" }
 parcel-core = { path = "../../crates/parcel-core" }
 replay = { path = "../../crates/replay" }
+reducer = { path = "../../crates/reducer" }
 serde_json.workspace = true
 verify = { path = "../../crates/verify" }

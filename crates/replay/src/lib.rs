@@ -13,6 +13,14 @@ pub struct ReplayResult {
 }
 
 pub fn run(spec: &ReproductionSpec, worktree: &Path) -> Result<ReplayResult> {
+    run_with_environment(spec, worktree, &[])
+}
+
+pub fn run_with_environment(
+    spec: &ReproductionSpec,
+    worktree: &Path,
+    additional_environment: &[(String, String)],
+) -> Result<ReplayResult> {
     let (program, args) = spec
         .command
         .split_first()
@@ -35,12 +43,20 @@ pub fn run(spec: &ReproductionSpec, worktree: &Path) -> Result<ReplayResult> {
         for (key, value) in &spec.environment.variables {
             command.arg("--env").arg(format!("{key}={value}"));
         }
+        for (key, value) in additional_environment {
+            command.arg("--env").arg(format!("{key}={value}"));
+        }
         command.arg(image).arg(program).args(args).output()?
     } else {
         Command::new(program)
             .args(args)
             .current_dir(worktree)
             .envs(&spec.environment.variables)
+            .envs(
+                additional_environment
+                    .iter()
+                    .map(|(key, value)| (key, value)),
+            )
             .env("BUGPARCEL_REPLAY", "1")
             .output()?
     };

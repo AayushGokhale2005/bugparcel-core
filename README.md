@@ -87,6 +87,20 @@ bugparcel capture --name checkout \
   -- python3 -m pytest -q
 ```
 
+## Stateful request reduction — Phase 5
+
+The FastAPI adapter captures a sanitized JSON request body as parcel state.
+After reproduction, reduce it with a contract-preserving search; the test command
+receives each candidate in `BUGPARCEL_STATE_JSON`.
+
+```sh
+bugparcel reduce <parcel-id> --output minimized-request.json
+```
+
+The reducer removes object fields and array items only when the complete failure
+contract still matches. Docker-backed reduction is intentionally deferred until
+the state-injection protocol is available inside containers.
+
 ```python
 from pathlib import Path
 

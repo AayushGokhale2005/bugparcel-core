@@ -33,6 +33,9 @@ class BugParcelSettings:
     redact_query_keys: frozenset[str] = field(
         default_factory=lambda: frozenset({"token", "secret", "password", "api_key"})
     )
+    redact_body_keys: frozenset[str] = field(
+        default_factory=lambda: frozenset({"token", "secret", "password", "api_key", "authorization"})
+    )
 
     def __post_init__(self) -> None:
         if not self.reproduction_command:
@@ -49,15 +52,16 @@ class BugParcelFastAPIMiddleware(BaseHTTPMiddleware):
         self.settings = settings
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
+        body = await request.body()
         try:
             return await call_next(request)
         except Exception as error:
             if os.environ.get("BUGPARCEL_REPLAY") != "1":
-                await asyncio.to_thread(self._capture, request, error)
+                await asyncio.to_thread(self._capture, request, body, error)
             raise
 
-    def _capture(self, request: Request, error: Exception) -> None:
-        event_path = self._write_event(request, error)
+    def _capture(self, request: Request, body: bytes, error: Exception) -> None:
+        event_path = self._write_event(request, body, error)
         name = f"fastapi-{request.method.lower()}-{uuid.uuid4().hex[:8]}"
         command = [
             *self.settings.cli_command,
@@ -68,6 +72,10 @@ class BugParcelFastAPIMiddleware(BaseHTTPMiddleware):
             type(error).__name__,
             "--contract-file",
             str(event_path),
+            "--state-file",
+            str(event_path),
+            "--state-json-pointer",
+            "/request/body",
             "--env",
             "BUGPARCEL_CAPTURED_FROM=fastapi",
             "--",
@@ -97,7 +105,7 @@ class BugParcelFastAPIMiddleware(BaseHTTPMiddleware):
         event["capture"] = receipt
         event_path.write_text(json.dumps(event, indent=2, sort_keys=True), encoding="utf-8")
 
-    def _write_event(self, request: Request, error: Exception) -> Path:
+    def _write_event(self, request: Request, body: bytes, error: Exception) -> Path:
         events = self.settings.parcel_store / "fastapi-events"
         events.mkdir(parents=True, exist_ok=True)
         event_path = events / f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex}.json"
@@ -113,9 +121,33 @@ class BugParcelFastAPIMiddleware(BaseHTTPMiddleware):
         )
         event = {
             "captured_at": datetime.now(UTC).isoformat(),
-            "request": {"method": request.method, "path": request.url.path, "query": query, "headers": headers},
+            "request": {
+                "method": request.method,
+                "path": request.url.path,
+                "query": query,
+                "headers": headers,
+                "body": self._sanitize_body(body),
+            },
             "error": {"type": type(error).__name__, "message": str(error)},
             "reproduction_command": list(self.settings.reproduction_command),
         }
         event_path.write_text(json.dumps(event, indent=2, sort_keys=True), encoding="utf-8")
         return event_path
+
+    def _sanitize_body(self, body: bytes):  # type: ignore[no-untyped-def]
+        if not body:
+            return None
+        try:
+            return self._redact_json(json.loads(body))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"encoding": "non-json", "byte_length": len(body)}
+
+    def _redact_json(self, value):  # type: ignore[no-untyped-def]
+        if isinstance(value, dict):
+            return {
+                key: "[REDACTED]" if key.lower() in self.settings.redact_body_keys else self._redact_json(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._redact_json(item) for item in value]
+        return value
