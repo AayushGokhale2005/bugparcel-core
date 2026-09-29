@@ -1,9 +1,0 @@
-pyproject.toml
-src/bugparcel_fastapi/__init__.py
-src/bugparcel_fastapi/middleware.py
-src/bugparcel_fastapi.egg-info/PKG-INFO
-src/bugparcel_fastapi.egg-info/SOURCES.txt
-src/bugparcel_fastapi.egg-info/dependency_links.txt
-src/bugparcel_fastapi.egg-info/requires.txt
-src/bugparcel_fastapi.egg-info/top_level.txt
-tests/test_middleware.py
