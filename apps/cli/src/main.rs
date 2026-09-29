@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use clap::{Parser, Subcommand};
-use parcel_core::{FailureAssertion, Manifest, ParcelStatus, ReproductionSpec, StateSnapshot};
+use parcel_core::{
+    FailureAssertion, FixtureSnapshot, Manifest, ParcelStatus, ReproductionSpec, StateSnapshot,
+};
+use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -32,6 +36,8 @@ enum Commands {
         state_file: Option<PathBuf>,
         #[arg(long, default_value = "/")]
         state_json_pointer: String,
+        #[arg(long = "fixture-file")]
+        fixture_files: Vec<PathBuf>,
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -80,6 +86,32 @@ fn worktree_path(root: &Path, parcel_id: &str, purpose: &str) -> PathBuf {
         .join("repo")
 }
 
+fn capture_fixtures(repo: &Path, fixture_files: &[PathBuf]) -> Result<Vec<FixtureSnapshot>> {
+    fixture_files
+        .iter()
+        .map(|path| {
+            let relative_path = path.strip_prefix(repo).with_context(|| {
+                format!("fixture must be inside repository: {}", path.display())
+            })?;
+            if relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                anyhow::bail!(
+                    "fixture path must not escape repository: {}",
+                    path.display()
+                );
+            }
+            let contents = fs::read(path)?;
+            Ok(FixtureSnapshot {
+                relative_path: relative_path.display().to_string(),
+                sha256: format!("{:x}", Sha256::digest(&contents)),
+                contents_base64: BASE64.encode(contents),
+            })
+        })
+        .collect()
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = root();
@@ -93,10 +125,12 @@ fn main() -> Result<()> {
             docker_image,
             state_file,
             state_json_pointer,
+            fixture_files,
             command,
         } => {
             let repo = env::current_dir()?;
             let state = git_state::capture(&repo).context("capture Git state")?;
+            let fixtures = capture_fixtures(&repo, &fixture_files)?;
             let mut manifest = Manifest::new(
                 state,
                 ReproductionSpec {
@@ -129,9 +163,17 @@ fn main() -> Result<()> {
                             Ok::<StateSnapshot, anyhow::Error>(StateSnapshot {
                                 source: path.display().to_string(),
                                 json,
+                                fixtures: fixtures.clone(),
                             })
                         })
-                        .transpose()?,
+                        .transpose()?
+                        .or_else(|| {
+                            (!fixtures.is_empty()).then(|| StateSnapshot {
+                                source: "fixture-only".into(),
+                                json: serde_json::Value::Null,
+                                fixtures,
+                            })
+                        }),
                 },
             );
             manifest.transition(

@@ -1,7 +1,13 @@
 use anyhow::{Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use parcel_core::ReproductionSpec;
 use serde::Serialize;
-use std::{path::Path, process::Command};
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+    process::Command,
+};
 
 #[derive(Debug, Serialize)]
 pub struct ReplayResult {
@@ -21,6 +27,7 @@ pub fn run_with_environment(
     worktree: &Path,
     additional_environment: &[(String, String)],
 ) -> Result<ReplayResult> {
+    materialize_fixtures(spec, worktree)?;
     let (program, args) = spec
         .command
         .split_first()
@@ -84,6 +91,30 @@ pub fn run_with_environment(
         stdout,
         stderr,
     })
+}
+
+fn materialize_fixtures(spec: &ReproductionSpec, worktree: &Path) -> Result<()> {
+    let Some(state) = &spec.state else {
+        return Ok(());
+    };
+    for fixture in &state.fixtures {
+        let relative = Path::new(&fixture.relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| matches!(part, Component::ParentDir))
+        {
+            anyhow::bail!("unsafe fixture path: {}", fixture.relative_path);
+        }
+        let contents = BASE64.decode(&fixture.contents_base64)?;
+        if format!("{:x}", Sha256::digest(&contents)) != fixture.sha256 {
+            anyhow::bail!("fixture digest mismatch: {}", fixture.relative_path);
+        }
+        let destination: PathBuf = worktree.join(relative);
+        fs::create_dir_all(destination.parent().expect("fixture parent"))?;
+        fs::write(destination, contents)?;
+    }
+    Ok(())
 }
 
 pub fn require_match(result: &ReplayResult) -> Result<()> {

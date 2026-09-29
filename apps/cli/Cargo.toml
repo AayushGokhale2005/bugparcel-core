@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 environment = { path = "../../crates/environment" }
@@ -17,4 +18,5 @@ parcel-core = { path = "../../crates/parcel-core" }
 replay = { path = "../../crates/replay" }
 reducer = { path = "../../crates/reducer" }
 serde_json.workspace = true
+sha2.workspace = true
 verify = { path = "../../crates/verify" }

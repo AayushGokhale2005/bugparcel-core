@@ -5,5 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 parcel-core = { path = "../parcel-core" }
 serde.workspace = true
+sha2.workspace = true

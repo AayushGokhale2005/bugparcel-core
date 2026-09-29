@@ -92,6 +92,15 @@ pub struct EnvironmentSpec {
 pub struct StateSnapshot {
     pub source: String,
     pub json: serde_json::Value,
+    #[serde(default)]
+    pub fixtures: Vec<FixtureSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FixtureSnapshot {
+    pub relative_path: String,
+    pub sha256: String,
+    pub contents_base64: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

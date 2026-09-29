@@ -26,6 +26,7 @@ class BugParcelSettings:
     reproduction_command: Sequence[str]
     parcel_store: Path
     cli_command: Sequence[str]
+    fixture_files: Sequence[Path] = ()
     capture_timeout_seconds: float = 30
     redact_headers: frozenset[str] = field(
         default_factory=lambda: frozenset({"authorization", "cookie", "set-cookie", "x-api-key"})
@@ -76,6 +77,7 @@ class BugParcelFastAPIMiddleware(BaseHTTPMiddleware):
             str(event_path),
             "--state-json-pointer",
             "/request/body",
+            *[item for path in self.settings.fixture_files for item in ("--fixture-file", str(path))],
             "--env",
             "BUGPARCEL_CAPTURED_FROM=fastapi",
             "--",

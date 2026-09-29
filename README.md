@@ -101,6 +101,10 @@ The reducer removes object fields and array items only when the complete failure
 contract still matches. Docker-backed reduction is intentionally deferred until
 the state-injection protocol is available inside containers.
 
+SQLite and other file-backed fixtures can be made portable with `--fixture-file`.
+BugParcel records the file contents and SHA-256 digest, then restores it at the
+same repository-relative path in each detached replay worktree.
+
 ```python
 from pathlib import Path
 
