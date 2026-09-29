@@ -120,8 +120,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "environment",
  "git-state",
  "parcel-core",
+ "reducer",
  "replay",
  "serde_json",
  "verify",
