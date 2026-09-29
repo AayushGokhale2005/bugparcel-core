@@ -18,7 +18,7 @@ This installs `bugparcel` and `bugparcel-mcp` on your PATH. Point MCP clients at
 - Versioned parcel manifests and append-only status transitions.
 - Content-addressed artifact storage using SHA-256.
 - Exact Git snapshot capture (HEAD, branch hint, staged and unstaged diffs).
-- Generic process reproduction with a stable exit-code assertion.
+- Generic process reproduction with a stable exit-code assertion, independent of framework or language.
 - CLI workflow: `capture`, `show`, `reproduce`, and `verify`.
 
 This local-first foundation does not yet implement cloud sharing or container isolation.
@@ -70,7 +70,59 @@ BUGPARCEL_HOME=/path/to/parcel-store \
   cargo run --manifest-path Cargo.toml -p bugparcel-mcp
 ```
 
-## FastAPI adapter — Phase 2
+## Framework-neutral server capture
+
+BugParcel's replay contract is not tied to FastAPI: the core CLI captures any
+command that can reproduce a server failure. Node, Go, Java, Ruby, PHP, and
+custom services can invoke the same portable contract from their error hook:
+
+```sh
+bugparcel capture --name checkout-500 \
+  --expect-output ZeroDivisionError \
+  --contract-file /tmp/bugparcel-event.json \
+  --state-file /tmp/bugparcel-event.json \
+  --state-json-pointer /request/body \
+  --env BUGPARCEL_CAPTURED_FROM=express \
+  -- npm test -- checkout-regression
+```
+
+The event file is ordinary sanitized JSON with `request`, `error`, and
+`reproduction_command` fields. It is a language-neutral boundary: adapters only
+need to write that event and invoke the local CLI; replay and verification stay
+identical for every backend.
+
+For Python servers, install the dependency-free generic adapter directly from a
+source checkout until it is published:
+
+```sh
+pip install -e sdks/python/bugparcel-capture
+```
+
+It provides manual capture plus ASGI and WSGI wrappers. ASGI covers FastAPI,
+Starlette, Django ASGI, Quart, and custom ASGI apps. WSGI covers Flask, Django
+WSGI, Bottle, and custom WSGI apps.
+
+```python
+from pathlib import Path
+
+from bugparcel_capture import BugParcelASGIMiddleware, BugParcelSettings
+
+app = BugParcelASGIMiddleware(
+    app,
+    settings=BugParcelSettings(
+        project_root=Path("/path/to/service"),
+        reproduction_command=["python", "-m", "pytest", "-q"],
+        parcel_store=Path("/path/to/bugparcel-store"),
+        cli_command=["bugparcel"],
+    ),
+)
+```
+
+Each wrapper redacts sensitive headers, query keys, and JSON body fields, skips
+capture during `BUGPARCEL_REPLAY=1`, and never replaces the application error
+if capture itself fails.
+
+## FastAPI convenience adapter
 
 The Python adapter writes a sanitized request/error event and invokes the local
 CLI when FastAPI raises an unhandled exception. It is automatically disabled in

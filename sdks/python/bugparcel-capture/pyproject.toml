@@ -1,0 +1,18 @@
+[project]
+name = "bugparcel-capture"
+version = "0.1.0"
+description = "Framework-neutral local failure capture for BugParcel"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

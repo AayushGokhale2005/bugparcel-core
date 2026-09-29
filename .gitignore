@@ -6,3 +6,4 @@ __pycache__/
 *.egg-info/
 apps/dashboard/node_modules/
 apps/dashboard/dist/
+/sdks/python/*/build/
