@@ -105,6 +105,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bugparcel-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "git-state",
+ "parcel-core",
+ "replay",
+ "serde_json",
+ "verify",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

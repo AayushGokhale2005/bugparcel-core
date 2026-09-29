@@ -1,0 +1,267 @@
+use anyhow::{Context, Result};
+use parcel_core::{Manifest, ParcelStatus};
+use serde_json::{Value, json};
+use std::{
+    env, fs,
+    io::{self, BufRead, Write},
+    path::{Path, PathBuf},
+};
+
+fn root() -> PathBuf {
+    env::var_os("BUGPARCEL_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::current_dir().expect("cwd").join(".bugparcel"))
+}
+
+fn manifest_path(root: &Path, id: &str) -> PathBuf {
+    root.join("parcels").join(id).join("manifest.json")
+}
+
+fn load(root: &Path, id: &str) -> Result<Manifest> {
+    Ok(serde_json::from_slice(&fs::read(manifest_path(root, id))?)?)
+}
+
+fn save(root: &Path, manifest: &Manifest) -> Result<()> {
+    let path = manifest_path(root, manifest.parcel_id.as_str());
+    fs::create_dir_all(path.parent().expect("parcel dir"))?;
+    fs::write(path, serde_json::to_vec_pretty(manifest)?)?;
+    Ok(())
+}
+
+fn worktree_path(root: &Path, parcel_id: &str, purpose: &str) -> PathBuf {
+    root.join("worktrees")
+        .join(parcel_id)
+        .join(format!(
+            "{purpose}-{}",
+            chrono::Utc::now().timestamp_millis()
+        ))
+        .join("repo")
+}
+
+fn tool(name: &str, description: &str, input_schema: Value) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": input_schema,
+    })
+}
+
+fn tool_definitions() -> Value {
+    json!([
+        tool(
+            "bugparcel_list_parcels",
+            "List local BugParcel manifests available to this agent.",
+            json!({"type": "object", "properties": {}}),
+        ),
+        tool(
+            "bugparcel_get_parcel",
+            "Read the complete, append-only manifest for one parcel.",
+            json!({
+                "type": "object",
+                "properties": {"parcel_id": {"type": "string"}},
+                "required": ["parcel_id"],
+            }),
+        ),
+        tool(
+            "bugparcel_reproduce",
+            "Reproduce a captured failure in a fresh detached Git worktree. This never changes the source branch.",
+            json!({
+                "type": "object",
+                "properties": {"parcel_id": {"type": "string"}},
+                "required": ["parcel_id"],
+            }),
+        ),
+        tool(
+            "bugparcel_verify",
+            "Apply a candidate patch in a fresh detached worktree and verify whether it removes the original failure.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "parcel_id": {"type": "string"},
+                    "patch_path": {"type": "string"},
+                },
+                "required": ["parcel_id", "patch_path"],
+            }),
+        ),
+    ])
+}
+
+fn text_result(value: Value) -> Value {
+    json!({
+        "content": [{"type": "text", "text": serde_json::to_string_pretty(&value).unwrap()}],
+        "structuredContent": value,
+    })
+}
+
+fn argument<'a>(arguments: &'a Value, key: &str) -> Result<&'a str> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .with_context(|| format!("missing required tool argument: {key}"))
+}
+
+fn list_parcels(root: &Path) -> Result<Value> {
+    let directory = root.join("parcels");
+    if !directory.exists() {
+        return Ok(json!([]));
+    }
+    let mut parcels = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path().join("manifest.json");
+        if !path.exists() {
+            continue;
+        }
+        let manifest: Manifest = serde_json::from_slice(&fs::read(path)?)?;
+        parcels.push(json!({
+            "parcel_id": manifest.parcel_id.as_str(),
+            "status": manifest.status,
+            "created_at": manifest.created_at,
+            "branch_hint": manifest.source.branch_hint,
+            "commit_sha": manifest.source.commit_sha,
+        }));
+    }
+    parcels.sort_by_key(|value| value["created_at"].as_str().map(str::to_owned));
+    Ok(Value::Array(parcels))
+}
+
+fn reproduce(root: &Path, parcel_id: &str) -> Result<Value> {
+    let mut manifest = load(root, parcel_id)?;
+    manifest.transition(
+        ParcelStatus::Reproducing,
+        Some("requested through local MCP".into()),
+    )?;
+    let worktree = worktree_path(root, parcel_id, "mcp-replay");
+    git_state::reconstruct(&manifest.source, &worktree)?;
+    let result = replay::run(&manifest.reproduction, &worktree)?;
+    manifest.transition(
+        if result.matched {
+            ParcelStatus::Reproducible
+        } else {
+            ParcelStatus::ReproFailed
+        },
+        Some(format!("observed exit code {}", result.observed_exit_code)),
+    )?;
+    save(root, &manifest)?;
+    Ok(json!({"parcel": manifest, "replay": result, "worktree": worktree}))
+}
+
+fn verify(root: &Path, parcel_id: &str, patch_path: &Path) -> Result<Value> {
+    let mut manifest = load(root, parcel_id)?;
+    if manifest.status != ParcelStatus::Reproducible {
+        anyhow::bail!("VERIFY_REQUIRES_REPRODUCIBLE_PARCEL");
+    }
+    manifest.transition(
+        ParcelStatus::FixProposed,
+        Some(format!("candidate patch: {}", patch_path.display())),
+    )?;
+    manifest.transition(
+        ParcelStatus::Verifying,
+        Some("requested through local MCP".into()),
+    )?;
+    let worktree = worktree_path(root, parcel_id, "mcp-verify");
+    git_state::reconstruct(&manifest.source, &worktree)?;
+    git_state::apply_patch(&worktree, &fs::read_to_string(patch_path)?)?;
+    let outcome = verify::verify_patch(&manifest.reproduction, &worktree)?;
+    let (next, outcome_text) = match outcome {
+        verify::VerificationStatus::Verified => (ParcelStatus::Verified, "verified"),
+        verify::VerificationStatus::OriginalFailureRemains => {
+            (ParcelStatus::VerifyFailed, "original_failure_remains")
+        }
+    };
+    manifest.transition(
+        next,
+        Some(format!("MCP verification outcome: {outcome_text}")),
+    )?;
+    save(root, &manifest)?;
+    Ok(json!({"parcel": manifest, "verification": outcome_text, "worktree": worktree}))
+}
+
+fn call_tool(root: &Path, name: &str, arguments: &Value) -> Result<Value> {
+    match name {
+        "bugparcel_list_parcels" => Ok(text_result(list_parcels(root)?)),
+        "bugparcel_get_parcel" => Ok(text_result(serde_json::to_value(load(
+            root,
+            argument(arguments, "parcel_id")?,
+        )?)?)),
+        "bugparcel_reproduce" => Ok(text_result(reproduce(
+            root,
+            argument(arguments, "parcel_id")?,
+        )?)),
+        "bugparcel_verify" => Ok(text_result(verify(
+            root,
+            argument(arguments, "parcel_id")?,
+            Path::new(argument(arguments, "patch_path")?),
+        )?)),
+        _ => anyhow::bail!("unknown tool: {name}"),
+    }
+}
+
+fn response(id: Value, result: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+fn error(id: Value, code: i64, message: impl ToString) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.to_string()}})
+}
+
+fn dispatch(root: &Path, request: Value) -> Option<Value> {
+    let id = request.get("id").cloned();
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    let result = match method {
+        "initialize" => Ok(json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": {"name": "bugparcel", "version": env!("CARGO_PKG_VERSION")},
+            "instructions": "Local-only BugParcel server. Reproduce and verify always run in detached Git worktrees.",
+        })),
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({"tools": tool_definitions()})),
+        "tools/call" => {
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .context("missing tool name");
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            name.and_then(|name| call_tool(root, name, &arguments))
+        }
+        "notifications/initialized" | "notifications/cancelled" => return None,
+        _ => Err(anyhow::anyhow!("method not found: {method}")),
+    };
+    id.map(|id| match result {
+        Ok(value) => response(id, value),
+        Err(error_value) => error(id, -32000, error_value),
+    })
+}
+
+fn main() -> Result<()> {
+    let root = root();
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().lock();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let request: Value = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(parse_error) => {
+                writeln!(stdout, "{}", error(Value::Null, -32700, parse_error))?;
+                stdout.flush()?;
+                continue;
+            }
+        };
+        if let Some(message) = dispatch(&root, request) {
+            writeln!(stdout, "{}", serde_json::to_string(&message)?)?;
+            stdout.flush()?;
+        }
+    }
+    Ok(())
+}

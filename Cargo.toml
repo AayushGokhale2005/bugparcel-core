@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "apps/cli",
+  "apps/mcp-server",
   "crates/artifact-store",
   "crates/git-state",
   "crates/parcel-core",

@@ -33,3 +33,34 @@ Use the independent [FastAPI sandbox](../../bugparcel-fastapi-sandbox) to test
 against a real application and an uncommitted checkout regression. It is a
 separate Git repository so its dirty state can be captured without affecting
 this core repository.
+
+## Local MCP server — Phase 1
+
+`bugparcel-mcp` is a local stdio MCP server for coding agents. It exposes four
+tools: `bugparcel_list_parcels`, `bugparcel_get_parcel`,
+`bugparcel_reproduce`, and `bugparcel_verify`.
+
+```sh
+BUGPARCEL_HOME=/path/to/parcel-store \
+  cargo run --manifest-path Cargo.toml -p bugparcel-mcp
+```
+
+MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "bugparcel": {
+      "command": "cargo",
+      "args": [
+        "run", "--quiet", "--manifest-path",
+        "/Users/aayushgokhale/Documents/BugParcel/bugparcel-core/Cargo.toml",
+        "-p", "bugparcel-mcp"
+      ],
+      "env": {
+        "BUGPARCEL_HOME": "/Users/aayushgokhale/Documents/bugparcel-runs"
+      }
+    }
+  }
+}
+```

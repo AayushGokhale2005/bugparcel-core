@@ -1,0 +1,17 @@
+[package]
+name = "bugparcel-mcp"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bugparcel-mcp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+git-state = { path = "../../crates/git-state" }
+parcel-core = { path = "../../crates/parcel-core" }
+replay = { path = "../../crates/replay" }
+serde_json.workspace = true
+verify = { path = "../../crates/verify" }
