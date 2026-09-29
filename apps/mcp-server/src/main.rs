@@ -127,6 +127,27 @@ fn tool_definitions() -> Value {
                 "properties": {"parcel_id": {"type": "string"}},
             }),
         ),
+        tool(
+            "bugparcel_diagnose",
+            "Re-run an incident safely and return an agent-ready diagnosis bundle: failure contract, captured state, replay result, and isolated worktree location.",
+            json!({
+                "type": "object",
+                "properties": {"parcel_id": {"type": "string"}},
+                "required": ["parcel_id"],
+            }),
+        ),
+        tool(
+            "bugparcel_propose_fix",
+            "Verify a unified Git diff supplied by an agent. The diff is applied only in a new detached BugParcel worktree and is never applied to the source branch.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "parcel_id": {"type": "string"},
+                    "patch": {"type": "string", "description": "A unified Git diff."},
+                },
+                "required": ["parcel_id", "patch"],
+            }),
+        ),
     ])
 }
 
@@ -254,23 +275,96 @@ fn capture(root: &Path, arguments: &Value) -> Result<Value> {
 
 fn reproduce(root: &Path, parcel_id: &str) -> Result<Value> {
     let mut manifest = load(root, parcel_id)?;
-    manifest.transition(
-        ParcelStatus::Reproducing,
-        Some("requested through local MCP".into()),
-    )?;
+    let should_track_transition = matches!(
+        manifest.status,
+        ParcelStatus::Captured | ParcelStatus::Reducing
+    );
+    if should_track_transition {
+        manifest.transition(
+            ParcelStatus::Reproducing,
+            Some("requested through local MCP".into()),
+        )?;
+    }
     let worktree = worktree_path(root, parcel_id, "mcp-replay");
     git_state::reconstruct(&manifest.source, &worktree)?;
     let result = replay::run(&manifest.reproduction, &worktree)?;
-    manifest.transition(
-        if result.matched {
-            ParcelStatus::Reproducible
-        } else {
-            ParcelStatus::ReproFailed
+    if should_track_transition {
+        manifest.transition(
+            if result.matched {
+                ParcelStatus::Reproducible
+            } else {
+                ParcelStatus::ReproFailed
+            },
+            Some(format!("observed exit code {}", result.observed_exit_code)),
+        )?;
+        save(root, &manifest)?;
+    }
+    Ok(json!({"parcel": manifest, "replay": result, "worktree": worktree}))
+}
+
+fn diagnosis(root: &Path, parcel_id: &str) -> Result<Value> {
+    let baseline = reproduce(root, parcel_id)?;
+    let contract = contract(root, parcel_id)?;
+    Ok(json!({
+        "parcel_id": parcel_id,
+        "diagnosis": {
+            "contract": contract,
+            "baseline": baseline["replay"].clone(),
+            "isolated_worktree": baseline["worktree"].clone(),
         },
-        Some(format!("observed exit code {}", result.observed_exit_code)),
+        "next_action": "Inspect the isolated worktree, then send a unified diff to bugparcel_propose_fix. The source branch remains unchanged.",
+    }))
+}
+
+fn changed_files(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|line| line.strip_prefix("+++ b/"))
+        .filter(|path| *path != "/dev/null")
+        .map(str::to_owned)
+        .collect()
+}
+
+fn propose_fix(root: &Path, parcel_id: &str, patch: &str) -> Result<Value> {
+    let mut manifest = load(root, parcel_id)?;
+    if manifest.status != ParcelStatus::Reproducible {
+        anyhow::bail!("VERIFY_REQUIRES_REPRODUCIBLE_PARCEL");
+    }
+    manifest.transition(
+        ParcelStatus::FixProposed,
+        Some("candidate patch submitted through local MCP".into()),
+    )?;
+    manifest.transition(
+        ParcelStatus::Verifying,
+        Some("verifying agent-supplied unified diff in detached worktree".into()),
+    )?;
+    let worktree = worktree_path(root, parcel_id, "mcp-agent-fix");
+    git_state::reconstruct(&manifest.source, &worktree)?;
+    git_state::apply_patch(&worktree, patch)?;
+    let outcome = verify::verify_patch(&manifest.reproduction, &worktree)?;
+    let (next, verification) = match outcome {
+        verify::VerificationStatus::Verified => (ParcelStatus::Verified, "verified"),
+        verify::VerificationStatus::OriginalFailureRemains => {
+            (ParcelStatus::VerifyFailed, "original_failure_remains")
+        }
+    };
+    manifest.transition(
+        next,
+        Some(format!("agent fix verification outcome: {verification}")),
     )?;
     save(root, &manifest)?;
-    Ok(json!({"parcel": manifest, "replay": result, "worktree": worktree}))
+    Ok(json!({
+        "parcel_id": parcel_id,
+        "verification": verification,
+        "changed_files": changed_files(patch),
+        "isolated_worktree": worktree,
+        "source_branch_modified": false,
+        "next_action": if verification == "verified" {
+            "Review and apply this same diff yourself when ready. BugParcel did not modify the source branch."
+        } else {
+            "Revise the diff and retry with a new reproducible parcel."
+        },
+    }))
 }
 
 fn verify(root: &Path, parcel_id: &str, patch_path: &Path) -> Result<Value> {
@@ -385,6 +479,15 @@ fn call_tool(root: &Path, name: &str, arguments: &Value) -> Result<Value> {
         "bugparcel_cleanup_worktrees" => Ok(text_result(cleanup_worktrees(
             root,
             arguments.get("parcel_id").and_then(Value::as_str),
+        )?)),
+        "bugparcel_diagnose" => Ok(text_result(diagnosis(
+            root,
+            argument(arguments, "parcel_id")?,
+        )?)),
+        "bugparcel_propose_fix" => Ok(text_result(propose_fix(
+            root,
+            argument(arguments, "parcel_id")?,
+            argument(arguments, "patch")?,
         )?)),
         _ => anyhow::bail!("unknown tool: {name}"),
     }

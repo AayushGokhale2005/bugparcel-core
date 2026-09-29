@@ -11,6 +11,6 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"bugparcel_list_parcels","arguments":{}}}' \
   | BUGPARCEL_HOME="$STORE" cargo run -q --manifest-path "$ROOT/Cargo.toml" -p bugparcel-mcp \
-  | grep -E '"serverInfo"|"bugparcel_reproduce"|"structuredContent"'
+  | grep -E '"serverInfo"|"bugparcel_reproduce"|"bugparcel_diagnose"|"bugparcel_propose_fix"|"structuredContent"'
 
 echo 'mcp stdio handshake passed'
