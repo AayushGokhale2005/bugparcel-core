@@ -56,6 +56,11 @@ enum Commands {
         #[arg(long)]
         patch: PathBuf,
     },
+    Export {
+        parcel_id: String,
+        #[arg(long)]
+        pytest: PathBuf,
+    },
     Reduce {
         parcel_id: String,
         #[arg(long)]
@@ -116,7 +121,7 @@ fn capture_fixtures(repo: &Path, fixture_files: &[PathBuf]) -> Result<Vec<Fixtur
         .collect()
 }
 
-fn main() -> Result<()> {
+fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let root = root();
     match cli.command {
@@ -135,51 +140,51 @@ fn main() -> Result<()> {
             let repo = env::current_dir()?;
             let state = git_state::capture(&repo).context("capture Git state")?;
             let fixtures = capture_fixtures(&repo, &fixture_files)?;
-            let mut manifest = Manifest::new(
-                state,
-                ReproductionSpec {
-                    environment: environment::capture(
-                        &repo,
-                        &command,
-                        &environment_values,
-                        docker_image,
-                    )?,
-                    command,
-                    failure_assertion: FailureAssertion {
-                        expected_exit_code,
-                        expected_output_contains,
-                        context: contract_file
-                            .map(fs::read)
-                            .transpose()?
-                            .map(|bytes| serde_json::from_slice(&bytes))
-                            .transpose()?,
-                    },
-                    state: state_file
-                        .map(|path| {
-                            let document: serde_json::Value =
-                                serde_json::from_slice(&fs::read(&path)?)?;
-                            let json = document
-                                .pointer(&state_json_pointer)
-                                .cloned()
-                                .with_context(|| {
-                                    format!("state JSON pointer not found: {state_json_pointer}")
-                                })?;
-                            Ok::<StateSnapshot, anyhow::Error>(StateSnapshot {
-                                source: path.display().to_string(),
-                                json,
-                                fixtures: fixtures.clone(),
-                            })
-                        })
+            let mut reproduction = ReproductionSpec {
+                environment: environment::capture(
+                    &repo,
+                    &command,
+                    &environment_values,
+                    docker_image,
+                )?,
+                command,
+                failure_assertion: FailureAssertion {
+                    expected_exit_code,
+                    expected_output_contains,
+                    context: contract_file
+                        .map(fs::read)
                         .transpose()?
-                        .or_else(|| {
-                            (!fixtures.is_empty()).then(|| StateSnapshot {
-                                source: "fixture-only".into(),
-                                json: serde_json::Value::Null,
-                                fixtures,
-                            })
-                        }),
+                        .map(|bytes| serde_json::from_slice(&bytes))
+                        .transpose()?,
                 },
-            );
+                state: state_file
+                    .map(|path| {
+                        let document: serde_json::Value =
+                            serde_json::from_slice(&fs::read(&path)?)?;
+                        let json = document
+                            .pointer(&state_json_pointer)
+                            .cloned()
+                            .with_context(|| {
+                                format!("state JSON pointer not found: {state_json_pointer}")
+                            })?;
+                        Ok::<StateSnapshot, anyhow::Error>(StateSnapshot {
+                            source: path.display().to_string(),
+                            json,
+                            fixtures: fixtures.clone(),
+                        })
+                    })
+                    .transpose()?
+                    .or_else(|| {
+                        (!fixtures.is_empty()).then(|| StateSnapshot {
+                            source: "fixture-only".into(),
+                            json: serde_json::Value::Null,
+                            fixtures,
+                        })
+                    }),
+                immutable_inputs: vec![],
+            };
+            reproduction.immutable_inputs = verify::capture_immutable_inputs(&repo, &reproduction)?;
+            let mut manifest = Manifest::new(state, reproduction);
             manifest.transition(
                 ParcelStatus::Captured,
                 Some(format!("captured by CLI as {name}")),
@@ -223,16 +228,28 @@ fn main() -> Result<()> {
             git_state::apply_patch(&worktree, &fs::read_to_string(patch)?)?;
             let status = verify::verify_patch(&manifest.reproduction, &worktree)?;
             let (next, message) = match status {
-                verify::VerificationStatus::Verified => {
-                    (ParcelStatus::Verified, "original failure no longer matched")
-                }
+                verify::VerificationStatus::Verified => (
+                    ParcelStatus::Verified,
+                    "failure removed and acceptance contract passed",
+                ),
                 verify::VerificationStatus::OriginalFailureRemains => {
                     (ParcelStatus::VerifyFailed, "original failure still matched")
                 }
+                verify::VerificationStatus::AcceptanceFailed { .. } => (
+                    ParcelStatus::VerifyFailed,
+                    "VERIFY_FAILED: acceptance contract failed",
+                ),
+                verify::VerificationStatus::ImmutableContractChanged { .. } => (
+                    ParcelStatus::VerifyFailed,
+                    "VERIFY_FAILED: immutable acceptance contract changed",
+                ),
             };
             manifest.transition(next, Some(message.into()))?;
             save(&root, &manifest)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
+            if next == ParcelStatus::VerifyFailed {
+                anyhow::bail!("VERIFY_FAILED");
+            }
         }
         Commands::Reduce { parcel_id, output } => {
             let manifest = load(&root, &parcel_id)?;
@@ -260,6 +277,43 @@ fn main() -> Result<()> {
             fs::write(&output, serde_json::to_vec_pretty(&minimized)?)?;
             println!("{}", serde_json::to_string_pretty(&minimized)?);
         }
+        Commands::Export { parcel_id, pytest } => {
+            let manifest = load(&root, &parcel_id)?;
+            if manifest.status != ParcelStatus::Verified {
+                anyhow::bail!("EXPORT_REQUIRES_VERIFIED_PARCEL");
+            }
+            export_pytest(&manifest, &pytest)?;
+            println!("{}", pytest.display());
+        }
     }
+    Ok(())
+}
+
+fn main() {
+    if let Err(error) = run_cli() {
+        eprintln!("{error:#}");
+        let message = error.to_string();
+        let exit_code = if message.contains("REPRO_MISSING_GIT_OBJECT") {
+            32
+        } else if message.contains("VERIFY_FAILED") {
+            21
+        } else {
+            1
+        };
+        std::process::exit(exit_code);
+    }
+}
+
+fn export_pytest(manifest: &Manifest, output: &Path) -> Result<()> {
+    fs::create_dir_all(output)?;
+    let test_path = output.join(format!("test_{}.py", manifest.parcel_id.as_str()));
+    let command = serde_json::to_string(&manifest.reproduction.command)?;
+    let body = format!(
+        "# Generated by BugParcel from a verified, immutable replay contract.\n# Run with: BUGPARCEL_REPOSITORY=/path/to/checkout pytest {}\n\nimport os\nimport subprocess\nfrom pathlib import Path\n\n\ndef test_{}_regression():\n    repo = Path(os.environ[\"BUGPARCEL_REPOSITORY\"])\n    result = subprocess.run({}, cwd=repo, text=True, capture_output=True)\n    assert result.returncode == 0, result.stdout + result.stderr\n",
+        test_path.display(),
+        manifest.parcel_id.as_str().replace('-', "_"),
+        command
+    );
+    fs::write(test_path, body)?;
     Ok(())
 }

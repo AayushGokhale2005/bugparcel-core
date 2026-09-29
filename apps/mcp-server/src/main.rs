@@ -82,7 +82,7 @@ fn tool_definitions() -> Value {
         ),
         tool(
             "bugparcel_verify",
-            "Apply a candidate patch in a fresh detached worktree and verify whether it removes the original failure.",
+            "Apply a candidate patch in a fresh detached worktree and verify both failure removal and the immutable acceptance contract.",
             json!({
                 "type": "object",
                 "properties": {
@@ -146,6 +146,15 @@ fn tool_definitions() -> Value {
                     "patch": {"type": "string", "description": "A unified Git diff."},
                 },
                 "required": ["parcel_id", "patch"],
+            }),
+        ),
+        tool(
+            "bugparcel_export_pytest",
+            "Export a verified parcel as a standalone pytest regression test.",
+            json!({
+                "type": "object",
+                "properties": {"parcel_id": {"type": "string"}, "output_dir": {"type": "string"}},
+                "required": ["parcel_id", "output_dir"],
             }),
         ),
     ])
@@ -241,30 +250,31 @@ fn capture(root: &Path, arguments: &Value) -> Result<Value> {
         json,
         fixtures: vec![],
     });
-    let mut manifest = Manifest::new(
-        git_state::capture(&repository).context("capture Git state")?,
-        ReproductionSpec {
-            environment: environment::capture(
-                &repository,
-                &command,
-                &environment_values,
-                arguments
-                    .get("docker_image")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            )?,
-            command,
-            failure_assertion: FailureAssertion {
-                expected_exit_code: arguments
-                    .get("expected_exit_code")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(1) as i32,
-                expected_output_contains: string_list(arguments, "expected_output_contains")?,
-                context: None,
-            },
-            state,
+    let source = git_state::capture(&repository).context("capture Git state")?;
+    let mut reproduction = ReproductionSpec {
+        environment: environment::capture(
+            &repository,
+            &command,
+            &environment_values,
+            arguments
+                .get("docker_image")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        )?,
+        command,
+        failure_assertion: FailureAssertion {
+            expected_exit_code: arguments
+                .get("expected_exit_code")
+                .and_then(Value::as_i64)
+                .unwrap_or(1) as i32,
+            expected_output_contains: string_list(arguments, "expected_output_contains")?,
+            context: None,
         },
-    );
+        state,
+        immutable_inputs: vec![],
+    };
+    reproduction.immutable_inputs = verify::capture_immutable_inputs(&repository, &reproduction)?;
+    let mut manifest = Manifest::new(source, reproduction);
     manifest.transition(
         ParcelStatus::Captured,
         Some("captured through local MCP".into()),
@@ -299,7 +309,10 @@ fn reproduce(root: &Path, parcel_id: &str) -> Result<Value> {
         )?;
         save(root, &manifest)?;
     }
-    Ok(json!({"parcel": manifest, "replay": result, "worktree": worktree}))
+    let environment_drift = git_state::environment_drift(&manifest.source)?;
+    Ok(
+        json!({"parcel": manifest, "replay": result, "worktree": worktree, "advisories": environment_drift.into_iter().collect::<Vec<_>>() }),
+    )
 }
 
 fn diagnosis(root: &Path, parcel_id: &str) -> Result<Value> {
@@ -311,6 +324,7 @@ fn diagnosis(root: &Path, parcel_id: &str) -> Result<Value> {
             "contract": contract,
             "baseline": baseline["replay"].clone(),
             "isolated_worktree": baseline["worktree"].clone(),
+            "advisories": baseline["advisories"].clone(),
         },
         "next_action": "Inspect the isolated worktree, then send a unified diff to bugparcel_propose_fix. The source branch remains unchanged.",
     }))
@@ -342,10 +356,17 @@ fn propose_fix(root: &Path, parcel_id: &str, patch: &str) -> Result<Value> {
     git_state::reconstruct(&manifest.source, &worktree)?;
     git_state::apply_patch(&worktree, patch)?;
     let outcome = verify::verify_patch(&manifest.reproduction, &worktree)?;
-    let (next, verification) = match outcome {
-        verify::VerificationStatus::Verified => (ParcelStatus::Verified, "verified"),
+    let advisories = git_state::environment_drift(&manifest.source)?;
+    let (next, verification, detail) = match outcome {
+        verify::VerificationStatus::Verified => (ParcelStatus::Verified, "verified", None),
         verify::VerificationStatus::OriginalFailureRemains => {
-            (ParcelStatus::VerifyFailed, "original_failure_remains")
+            (ParcelStatus::VerifyFailed, "original_failure_remains", None)
+        }
+        verify::VerificationStatus::AcceptanceFailed { reason } => {
+            (ParcelStatus::VerifyFailed, "verify_failed", Some(reason))
+        }
+        verify::VerificationStatus::ImmutableContractChanged { path } => {
+            (ParcelStatus::VerifyFailed, "verify_failed", Some(path))
         }
     };
     manifest.transition(
@@ -359,6 +380,8 @@ fn propose_fix(root: &Path, parcel_id: &str, patch: &str) -> Result<Value> {
         "changed_files": changed_files(patch),
         "isolated_worktree": worktree,
         "source_branch_modified": false,
+        "verification_detail": detail,
+        "advisories": advisories.into_iter().collect::<Vec<_>>(),
         "next_action": if verification == "verified" {
             "Review and apply this same diff yourself when ready. BugParcel did not modify the source branch."
         } else {
@@ -384,10 +407,17 @@ fn verify(root: &Path, parcel_id: &str, patch_path: &Path) -> Result<Value> {
     git_state::reconstruct(&manifest.source, &worktree)?;
     git_state::apply_patch(&worktree, &fs::read_to_string(patch_path)?)?;
     let outcome = verify::verify_patch(&manifest.reproduction, &worktree)?;
-    let (next, outcome_text) = match outcome {
-        verify::VerificationStatus::Verified => (ParcelStatus::Verified, "verified"),
+    let advisories = git_state::environment_drift(&manifest.source)?;
+    let (next, outcome_text, detail) = match outcome {
+        verify::VerificationStatus::Verified => (ParcelStatus::Verified, "verified", None),
         verify::VerificationStatus::OriginalFailureRemains => {
-            (ParcelStatus::VerifyFailed, "original_failure_remains")
+            (ParcelStatus::VerifyFailed, "original_failure_remains", None)
+        }
+        verify::VerificationStatus::AcceptanceFailed { reason } => {
+            (ParcelStatus::VerifyFailed, "verify_failed", Some(reason))
+        }
+        verify::VerificationStatus::ImmutableContractChanged { path } => {
+            (ParcelStatus::VerifyFailed, "verify_failed", Some(path))
         }
     };
     manifest.transition(
@@ -395,7 +425,9 @@ fn verify(root: &Path, parcel_id: &str, patch_path: &Path) -> Result<Value> {
         Some(format!("MCP verification outcome: {outcome_text}")),
     )?;
     save(root, &manifest)?;
-    Ok(json!({"parcel": manifest, "verification": outcome_text, "worktree": worktree}))
+    Ok(
+        json!({"parcel": manifest, "verification": outcome_text, "verification_detail": detail, "advisories": advisories.into_iter().collect::<Vec<_>>(), "worktree": worktree}),
+    )
 }
 
 fn reduce(root: &Path, parcel_id: &str) -> Result<Value> {
@@ -451,6 +483,27 @@ fn cleanup_worktrees(root: &Path, parcel_id: Option<&str>) -> Result<Value> {
     Ok(json!({"removed": removed}))
 }
 
+fn export_pytest(root: &Path, parcel_id: &str, output_dir: &Path) -> Result<Value> {
+    let manifest = load(root, parcel_id)?;
+    if manifest.status != ParcelStatus::Verified {
+        anyhow::bail!("EXPORT_REQUIRES_VERIFIED_PARCEL");
+    }
+    fs::create_dir_all(output_dir)?;
+    let path = output_dir.join(format!("test_{}.py", manifest.parcel_id.as_str()));
+    let command = serde_json::to_string(&manifest.reproduction.command)?;
+    let test_name = manifest.parcel_id.as_str().replace('-', "_");
+    fs::write(
+        &path,
+        format!(
+            "# Generated by BugParcel from an immutable verified parcel.\n# Run with: BUGPARCEL_REPOSITORY=/path/to/checkout pytest {}\n\nimport os\nimport subprocess\nfrom pathlib import Path\n\n\ndef test_{test_name}_regression():\n    repo = Path(os.environ[\"BUGPARCEL_REPOSITORY\"])\n    result = subprocess.run({command}, cwd=repo, text=True, capture_output=True)\n    assert result.returncode == 0, result.stdout + result.stderr\n",
+            path.display(),
+        ),
+    )?;
+    Ok(
+        json!({"parcel_id": parcel_id, "pytest_path": path, "command": manifest.reproduction.command}),
+    )
+}
+
 fn call_tool(root: &Path, name: &str, arguments: &Value) -> Result<Value> {
     match name {
         "bugparcel_list_parcels" => Ok(text_result(list_parcels(root)?)),
@@ -488,6 +541,11 @@ fn call_tool(root: &Path, name: &str, arguments: &Value) -> Result<Value> {
             root,
             argument(arguments, "parcel_id")?,
             argument(arguments, "patch")?,
+        )?)),
+        "bugparcel_export_pytest" => Ok(text_result(export_pytest(
+            root,
+            argument(arguments, "parcel_id")?,
+            Path::new(argument(arguments, "output_dir")?),
         )?)),
         _ => anyhow::bail!("unknown tool: {name}"),
     }

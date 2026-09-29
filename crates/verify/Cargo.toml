@@ -7,3 +7,4 @@ edition.workspace = true
 anyhow.workspace = true
 parcel-core = { path = "../parcel-core" }
 replay = { path = "../replay" }
+sha2.workspace = true

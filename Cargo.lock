@@ -660,6 +660,7 @@ dependencies = [
  "anyhow",
  "parcel-core",
  "replay",
+ "sha2",
 ]
 
 [[package]]

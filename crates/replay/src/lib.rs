@@ -32,7 +32,13 @@ pub fn run_with_environment(
         .command
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("reproduction command cannot be empty"))?;
-    let output = if let Some(image) = &spec.environment.container_image {
+    let use_container = spec.environment.container_image.is_some() && docker_daemon_available();
+    let output = if use_container {
+        let image = spec
+            .environment
+            .container_image
+            .as_ref()
+            .expect("checked above");
         let workspace = worktree.canonicalize()?;
         let mut command = Command::new("docker");
         command
@@ -91,6 +97,13 @@ pub fn run_with_environment(
         stdout,
         stderr,
     })
+}
+
+fn docker_daemon_available() -> bool {
+    Command::new("docker")
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 fn materialize_fixtures(spec: &ReproductionSpec, worktree: &Path) -> Result<()> {

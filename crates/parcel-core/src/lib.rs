@@ -53,6 +53,20 @@ pub struct GitState {
     pub branch_hint: Option<String>,
     pub staged_patch: Option<String>,
     pub working_tree_patch: Option<String>,
+    /// Recursive submodule state is captured separately because a parent Git
+    /// diff only records a gitlink, not the submodule checkout or its dirt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub submodules: Vec<SubmoduleState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SubmoduleState {
+    pub relative_path: String,
+    pub commit_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_patch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_tree_patch: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -111,6 +125,16 @@ pub struct ReproductionSpec {
     pub environment: EnvironmentSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<StateSnapshot>,
+    /// Hashes of executable replay inputs captured before a candidate patch is
+    /// applied. They keep the reproduction contract outside agent control.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub immutable_inputs: Vec<ImmutableInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ImmutableInput {
+    pub relative_path: String,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -202,6 +226,7 @@ mod tests {
                 branch_hint: None,
                 staged_patch: None,
                 working_tree_patch: None,
+                submodules: vec![],
             },
             ReproductionSpec {
                 command: vec!["false".into()],
@@ -212,6 +237,7 @@ mod tests {
                 },
                 environment: EnvironmentSpec::default(),
                 state: None,
+                immutable_inputs: vec![],
             },
         );
         manifest.transition(ParcelStatus::Captured, None).unwrap();
