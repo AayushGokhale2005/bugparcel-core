@@ -11,7 +11,11 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(name = "bugparcel", about = "Local-first reproducible failure parcels")]
+#[command(
+    name = "bugparcel",
+    about = "Local-first reproducible failure parcels",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

@@ -6,6 +6,7 @@ The implementation workspace for BugParcel's local-first CLI and daemon-era core
 
 ```bash
 brew tap AayushGokhale2005/bugparcel
+brew trust AayushGokhale2005/bugparcel   # Homebrew 7+
 brew install bugparcel
 bugparcel --help
 ```
