@@ -2,6 +2,16 @@
 
 The implementation workspace for BugParcel's local-first CLI and daemon-era core. The landing page remains at the repository root; this directory intentionally owns product behavior.
 
+## Install (Homebrew)
+
+```bash
+brew tap AayushGokhale2005/bugparcel
+brew install bugparcel
+bugparcel --help
+```
+
+This installs `bugparcel` and `bugparcel-mcp` on your PATH. Point MCP clients at `bugparcel-mcp` and set `BUGPARCEL_HOME` to your parcel store.
+
 ## Current vertical slice
 
 - Versioned parcel manifests and append-only status transitions.
@@ -36,33 +46,27 @@ this core repository.
 
 ## Local MCP server — Phase 1
 
-`bugparcel-mcp` is a local stdio MCP server for coding agents. It exposes four
-tools: `bugparcel_list_parcels`, `bugparcel_get_parcel`,
-`bugparcel_reproduce`, and `bugparcel_verify`.
-
-```sh
-BUGPARCEL_HOME=/path/to/parcel-store \
-  cargo run --manifest-path Cargo.toml -p bugparcel-mcp
-```
-
-MCP client configuration:
+`bugparcel-mcp` is a local stdio MCP server for coding agents. After
+`brew install bugparcel`, configure clients to run the binary on PATH:
 
 ```json
 {
   "mcpServers": {
     "bugparcel": {
-      "command": "cargo",
-      "args": [
-        "run", "--quiet", "--manifest-path",
-        "/Users/aayushgokhale/Documents/BugParcel/bugparcel-core/Cargo.toml",
-        "-p", "bugparcel-mcp"
-      ],
+      "command": "bugparcel-mcp",
       "env": {
-        "BUGPARCEL_HOME": "/Users/aayushgokhale/Documents/bugparcel-runs"
+        "BUGPARCEL_HOME": "./.bugparcel"
       }
     }
   }
 }
+```
+
+From a source checkout you can still run:
+
+```sh
+BUGPARCEL_HOME=/path/to/parcel-store \
+  cargo run --manifest-path Cargo.toml -p bugparcel-mcp
 ```
 
 ## FastAPI adapter — Phase 2
