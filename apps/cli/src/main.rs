@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
+    thread,
+    time::Duration,
 };
 
 #[derive(Parser)]
@@ -23,10 +26,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Authenticate this CLI with BugParcel Enterprise in your browser.
+    Auth,
     /// Save a BugParcel Enterprise project as this workspace's remote.
     AddRemote {
         /// Full project URL, for example https://bugparcel-enterprise.vercel.app/projects/payments-api
         project_link: String,
+    },
+    /// Share sanitized parcel metadata with the configured Enterprise remote.
+    Push {
+        parcel_id: String,
+        #[arg(long, default_value = "/")]
+        state_pointer: String,
     },
     Capture {
         #[arg(long)]
@@ -84,6 +95,66 @@ fn manifest_path(root: &Path, id: &str) -> PathBuf {
 fn remote_path(root: &Path) -> PathBuf {
     root.join("enterprise").join("remote.json")
 }
+fn session_path(root: &Path) -> PathBuf {
+    root.join("enterprise").join("session.json")
+}
+fn enterprise_api() -> String {
+    env::var("BUGPARCEL_ENTERPRISE_API")
+        .unwrap_or_else(|_| "https://bugparcel-enterprise-api.ag2323.workers.dev".into())
+}
+fn config_value(path: &Path) -> Result<serde_json::Value> {
+    Ok(serde_json::from_slice(&fs::read(path).with_context(
+        || format!("missing configuration: {}", path.display()),
+    )?)?)
+}
+fn curl_json(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let mut command = Command::new("curl");
+    command.args([
+        "--silent",
+        "--show-error",
+        "--fail-with-body",
+        "-X",
+        method,
+        url,
+    ]);
+    command.args(["-H", "content-type: application/json"]);
+    if let Some(token) = token {
+        command.args(["-H", &format!("authorization: Bearer {token}")]);
+    }
+    if let Some(body) = body {
+        command.args(["--data", &serde_json::to_string(body)?]);
+    }
+    let output = command
+        .output()
+        .context("run curl for BugParcel Enterprise")?;
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap_or_else(
+        |_| serde_json::json!({ "detail": String::from_utf8_lossy(&output.stderr) }),
+    );
+    if !output.status.success() {
+        anyhow::bail!(
+            "ENTERPRISE_REQUEST_FAILED: {}",
+            parsed["detail"]
+                .as_str()
+                .or(parsed["error"].as_str())
+                .unwrap_or("request failed")
+        );
+    }
+    Ok(parsed)
+}
+fn session_token(root: &Path) -> Result<String> {
+    if let Ok(token) = env::var("BUGPARCEL_ENTERPRISE_TOKEN") {
+        return Ok(token);
+    }
+    config_value(&session_path(root))?["access_token"]
+        .as_str()
+        .map(str::to_owned)
+        .context("AUTH_REQUIRED: run `bugparcel auth` first")
+}
 fn normalize_project_link(value: &str) -> Result<String> {
     let project_link = value.trim().trim_end_matches('/');
     let remainder = project_link
@@ -118,6 +189,49 @@ fn save_remote(root: &Path, project_link: &str) -> Result<()> {
         serde_json::to_vec_pretty(&serde_json::json!({ "project_url": project_link }))?,
     )?;
     Ok(())
+}
+fn redact(value: &serde_json::Value, key: &str) -> serde_json::Value {
+    let sensitive = [
+        "password",
+        "secret",
+        "token",
+        "authorization",
+        "cookie",
+        "api_key",
+        "private_key",
+        "credential",
+    ];
+    if sensitive
+        .iter()
+        .any(|term| key.to_ascii_lowercase().contains(term))
+    {
+        return serde_json::Value::String("[REDACTED]".into());
+    }
+    match value {
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .take(100)
+                .map(|item| redact(item, ""))
+                .collect(),
+        ),
+        serde_json::Value::Object(items) => serde_json::Value::Object(
+            items
+                .iter()
+                .map(|(key, value)| (key.clone(), redact(value, key)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+fn enterprise_payload(manifest: &Manifest, pointer: &str) -> Result<serde_json::Value> {
+    let state = manifest.reproduction.state.as_ref().map(|snapshot| {
+        let selected = if pointer == "/" { snapshot.json.clone() } else { snapshot.json.pointer(pointer).cloned().context("STATE_POINTER_NOT_FOUND")? };
+        Ok::<_, anyhow::Error>(serde_json::json!({ "source": snapshot.source, "selected_state": redact(&selected, ""), "fixtures": snapshot.fixtures.iter().map(|fixture| serde_json::json!({ "relative_path": fixture.relative_path, "sha256": fixture.sha256, "transfer": "omitted" })).collect::<Vec<_>>() }))
+    }).transpose()?;
+    Ok(
+        serde_json::json!({ "schema_version": "enterprise-share-v1", "parcel_id": manifest.parcel_id.as_str(), "source": { "commit_sha": manifest.source.commit_sha, "branch_hint": manifest.source.branch_hint }, "status": format!("{:?}", manifest.status).to_lowercase(), "failure_assertion": redact(&serde_json::to_value(&manifest.reproduction.failure_assertion)?, ""), "environment": { "python": manifest.reproduction.environment.python, "lockfiles": manifest.reproduction.environment.lockfiles, "container_image": manifest.reproduction.environment.container_image }, "state": state, "sanitization": { "fixture_bytes": "omitted", "database_rows": "not transferred", "sensitive_values": "redacted" } }),
+    )
 }
 fn load(root: &Path, id: &str) -> Result<Manifest> {
     Ok(serde_json::from_slice(&fs::read(manifest_path(root, id))?)?)
@@ -168,11 +282,83 @@ fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let root = root();
     match cli.command {
+        Commands::Auth => {
+            let request_id = format!(
+                "cli_{}_{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_millis()
+            );
+            let request = curl_json(
+                "POST",
+                &format!("{}/api/auth/requests", enterprise_api()),
+                None,
+                Some(&serde_json::json!({ "request_id": request_id })),
+            )?;
+            let access_url = request["access_url"]
+                .as_str()
+                .context("AUTH_REQUEST_FAILED")?;
+            println!("Open this URL and enter your invite code:\n{access_url}");
+            let _ = Command::new("open").arg(access_url).spawn();
+            for _ in 0..300 {
+                thread::sleep(Duration::from_secs(1));
+                let status = curl_json(
+                    "GET",
+                    &format!("{}/api/auth/requests/{request_id}", enterprise_api()),
+                    None,
+                    None,
+                )?;
+                if status["state"] == "complete" {
+                    let token = status["session"]["access_token"]
+                        .as_str()
+                        .context("AUTH_REQUEST_FAILED")?;
+                    let path = session_path(&root);
+                    fs::create_dir_all(path.parent().expect("session dir"))?;
+                    fs::write(
+                        path,
+                        serde_json::to_vec_pretty(&serde_json::json!({ "access_token": token }))?,
+                    )?;
+                    println!("Authenticated.");
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("AUTH_TIMEOUT: no invite code was submitted within five minutes");
+        }
         Commands::AddRemote { project_link } => {
             let project_link = normalize_project_link(&project_link)?;
             save_remote(&root, &project_link)?;
             println!("BugParcel remote set to {project_link}");
-            println!("Future `bugparcel push <parcel-id>` commands will target this project.");
+            println!(
+                "`bugparcel push <parcel-id>` will target this project after `bugparcel auth`."
+            );
+        }
+        Commands::Push {
+            parcel_id,
+            state_pointer,
+        } => {
+            let project_url = config_value(&remote_path(&root))?["project_url"]
+                .as_str()
+                .map(str::to_owned)
+                .context("REMOTE_REQUIRED: run `bugparcel add-remote <project-link>` first")?;
+            let token = session_token(&root)?;
+            let workspace = curl_json(
+                "GET",
+                &format!("{}/api/workspace", enterprise_api()),
+                Some(&token),
+                None,
+            )?;
+            let project = workspace["projects"].as_array().and_then(|projects| projects.iter().find(|project| project["project_url"].as_str() == Some(project_url.as_str()))).context("PROJECT_NOT_FOUND: this account cannot access the configured BugParcel project")?;
+            let manifest = load(&root, &parcel_id)?;
+            let payload = enterprise_payload(&manifest, &state_pointer)?;
+            let sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&payload)?));
+            let response = curl_json(
+                "POST",
+                &format!("{}/api/parcels", enterprise_api()),
+                Some(&token),
+                Some(
+                    &serde_json::json!({ "project_id": project["id"], "parcel_id": manifest.parcel_id.as_str(), "sha256": sha256, "status": format!("{:?}", manifest.status).to_lowercase(), "source_commit": manifest.source.commit_sha, "state_scope": state_pointer, "payload": payload }),
+                ),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Commands::Capture {
             name,
