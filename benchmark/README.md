@@ -57,7 +57,7 @@ page must show `Not measured` until each compared metric has a denominator.
 Run the harness tests with:
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -t . -v
 ```
 
 ## Review checklist
