@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "study_status": "curating_corpus",
+  "target_cases": 24,
+  "eligible_cases": 0,
+  "arms": {
+    "baseline": {
+      "measured": false,
+      "runs": 0,
+      "genuine_fixes": null,
+      "false_fixes": null,
+      "fix_rate": null,
+      "false_fix_rate": null
+    },
+    "parcel": {
+      "measured": false,
+      "runs": 0,
+      "genuine_fixes": null,
+      "false_fixes": null,
+      "fix_rate": null,
+      "false_fix_rate": null
+    }
+  },
+  "notes": [
+    "No agent performance result has been measured or claimed.",
+    "Cases must have an immutable independently runnable acceptance command before they are eligible."
+  ]
+}
