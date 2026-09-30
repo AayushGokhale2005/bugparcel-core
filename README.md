@@ -27,6 +27,17 @@ This local-first foundation does not yet implement cloud sharing or container is
 cargo run -p bugparcel -- capture --name "failing-auth" -- npm test -- auth
 ```
 
+## Enterprise remote
+
+Associate the current workspace with a hosted BugParcel project before sharing
+parcels:
+
+```sh
+bugparcel add-remote https://bugparcel-enterprise.vercel.app/projects/<project>
+```
+
+The project URL is stored locally at `.bugparcel/enterprise/remote.json`.
+
 ## Prove the vertical slice
 
 The integration fixture is an intentionally dirty Git repository. It proves that

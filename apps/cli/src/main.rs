@@ -23,6 +23,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Save a BugParcel Enterprise project as this workspace's remote.
+    AddRemote {
+        /// Full project URL, for example https://bugparcel-enterprise.vercel.app/projects/payments-api
+        project_link: String,
+    },
     Capture {
         #[arg(long)]
         name: String,
@@ -76,6 +81,44 @@ fn root() -> PathBuf {
 fn manifest_path(root: &Path, id: &str) -> PathBuf {
     root.join("parcels").join(id).join("manifest.json")
 }
+fn remote_path(root: &Path) -> PathBuf {
+    root.join("enterprise").join("remote.json")
+}
+fn normalize_project_link(value: &str) -> Result<String> {
+    let project_link = value.trim().trim_end_matches('/');
+    let remainder = project_link
+        .strip_prefix("https://")
+        .or_else(|| project_link.strip_prefix("http://"))
+        .context("PROJECT_LINK_INVALID: paste the full BugParcel project URL")?;
+    let (_, path) = remainder
+        .split_once('/')
+        .context("PROJECT_LINK_INVALID: expected .../projects/<project>")?;
+    let parts = path
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .split('/')
+        .collect::<Vec<_>>();
+    if parts.len() != 2
+        || parts[0] != "projects"
+        || parts[1].is_empty()
+        || parts[1].chars().any(char::is_whitespace)
+    {
+        anyhow::bail!(
+            "PROJECT_LINK_INVALID: expected https://bugparcel-enterprise.vercel.app/projects/<project>"
+        );
+    }
+    Ok(project_link.to_owned())
+}
+fn save_remote(root: &Path, project_link: &str) -> Result<()> {
+    let path = remote_path(root);
+    fs::create_dir_all(path.parent().expect("enterprise config dir"))?;
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({ "project_url": project_link }))?,
+    )?;
+    Ok(())
+}
 fn load(root: &Path, id: &str) -> Result<Manifest> {
     Ok(serde_json::from_slice(&fs::read(manifest_path(root, id))?)?)
 }
@@ -125,6 +168,12 @@ fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let root = root();
     match cli.command {
+        Commands::AddRemote { project_link } => {
+            let project_link = normalize_project_link(&project_link)?;
+            save_remote(&root, &project_link)?;
+            println!("BugParcel remote set to {project_link}");
+            println!("Future `bugparcel push <parcel-id>` commands will target this project.");
+        }
         Commands::Capture {
             name,
             expected_output_contains,
