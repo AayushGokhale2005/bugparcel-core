@@ -187,6 +187,10 @@ impl Manifest {
                     ParcelStatus::Reproducing,
                     ParcelStatus::ReproFailed | ParcelStatus::Reproducible
                 )
+                // A replay or verification failure is evidence, not a terminal state. Agents
+                // need to be able to inspect that evidence, revise a candidate diff, and ask
+                // BugParcel for another isolated baseline without recapturing the incident.
+                | (ParcelStatus::ReproFailed | ParcelStatus::VerifyFailed, ParcelStatus::Reproducing)
                 | (
                     ParcelStatus::Reproducible,
                     ParcelStatus::Shared | ParcelStatus::FixProposed
@@ -248,5 +252,42 @@ mod tests {
             .transition(ParcelStatus::Reproducible, None)
             .unwrap();
         assert_eq!(manifest.status_events.len(), 3);
+    }
+
+    #[test]
+    fn failed_verification_can_be_replayed_without_recapture() {
+        let mut manifest = Manifest::new(
+            GitState {
+                repository_path: "/tmp/repo".into(),
+                commit_sha: "abc".into(),
+                branch_hint: None,
+                staged_patch: None,
+                working_tree_patch: None,
+                submodules: vec![],
+            },
+            ReproductionSpec {
+                command: vec!["false".into()],
+                failure_assertion: FailureAssertion {
+                    expected_exit_code: 1,
+                    expected_output_contains: vec![],
+                    context: None,
+                },
+                environment: EnvironmentSpec::default(),
+                state: None,
+                immutable_inputs: vec![],
+            },
+        );
+        for status in [
+            ParcelStatus::Captured,
+            ParcelStatus::Reproducing,
+            ParcelStatus::Reproducible,
+            ParcelStatus::FixProposed,
+            ParcelStatus::Verifying,
+            ParcelStatus::VerifyFailed,
+            ParcelStatus::Reproducing,
+        ] {
+            manifest.transition(status, None).unwrap();
+        }
+        assert_eq!(manifest.status, ParcelStatus::Reproducing);
     }
 }

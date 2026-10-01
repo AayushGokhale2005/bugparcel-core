@@ -287,7 +287,10 @@ fn reproduce(root: &Path, parcel_id: &str) -> Result<Value> {
     let mut manifest = load(root, parcel_id)?;
     let should_track_transition = matches!(
         manifest.status,
-        ParcelStatus::Captured | ParcelStatus::Reducing
+        ParcelStatus::Captured
+            | ParcelStatus::Reducing
+            | ParcelStatus::ReproFailed
+            | ParcelStatus::VerifyFailed
     );
     if should_track_transition {
         manifest.transition(
@@ -385,7 +388,7 @@ fn propose_fix(root: &Path, parcel_id: &str, patch: &str) -> Result<Value> {
         "next_action": if verification == "verified" {
             "Review and apply this same diff yourself when ready. BugParcel did not modify the source branch."
         } else {
-            "Revise the diff and retry with a new reproducible parcel."
+            "Read verification_detail, then call bugparcel_reproduce to establish a fresh isolated baseline before submitting a revised diff."
         },
     }))
 }

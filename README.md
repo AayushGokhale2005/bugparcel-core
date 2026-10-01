@@ -13,6 +13,28 @@ bugparcel --help
 
 This installs `bugparcel` and `bugparcel-mcp` on your PATH. Point MCP clients at `bugparcel-mcp` and set `BUGPARCEL_HOME` to your parcel store.
 
+### Give coding agents access
+
+Run this from the **source repository an agent will work in** (not from a
+parent monorepo):
+
+```sh
+bugparcel mcp install
+bugparcel mcp doctor
+```
+
+The installer creates a repository-scoped `.codex/config.toml` that starts
+`bugparcel-mcp` and exposes that repository's `.bugparcel` store. Codex does
+not inherit a parent repository's MCP configuration when an agent is started
+inside a nested checkout, so this step is required for each source repository.
+
+For local BugParcel development before the binaries are installed, use:
+
+```sh
+cargo run -p bugparcel -- mcp install --development
+cargo run -p bugparcel -- mcp doctor
+```
+
 ## Current vertical slice
 
 - Versioned parcel manifests and append-only status transitions.

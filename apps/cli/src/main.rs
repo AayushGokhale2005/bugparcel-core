@@ -26,6 +26,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Configure BugParcel's local MCP server for coding agents in this repository.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
     /// Authenticate this CLI with BugParcel Enterprise in your browser.
     Auth,
     /// Save a BugParcel Enterprise project as this workspace's remote.
@@ -84,10 +89,153 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Install a repository-scoped Codex MCP configuration so nested agent sessions can discover BugParcel.
+    Install {
+        /// Use Cargo to launch the MCP server from this checkout. Intended for BugParcel development only.
+        #[arg(long)]
+        development: bool,
+        /// Parcel store to expose to agents. Defaults to <repository>/.bugparcel.
+        #[arg(long)]
+        store: Option<PathBuf>,
+    },
+    /// Confirm that Codex can discover this repository's BugParcel MCP configuration.
+    Doctor,
+}
+
 fn root() -> PathBuf {
     env::var_os("BUGPARCEL_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| env::current_dir().expect("cwd").join(".bugparcel"))
+}
+
+fn repository_root() -> Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("locate Git repository for MCP configuration")?;
+    if !output.status.success() {
+        anyhow::bail!("MCP_INSTALL_REQUIRES_GIT_REPOSITORY");
+    }
+    Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
+}
+
+fn codex_config_path(repository: &Path) -> PathBuf {
+    repository.join(".codex").join("config.toml")
+}
+
+fn read_codex_config(path: &Path) -> Result<toml::Table> {
+    if !path.exists() {
+        return Ok(toml::Table::new());
+    }
+    fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?
+        .parse::<toml::Table>()
+        .with_context(|| format!("parse {}", path.display()))
+}
+
+fn bugparcel_server_config(development: bool, store: &Path) -> Result<toml::Value> {
+    let mut server = toml::Table::new();
+    if development {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("Cargo.toml")
+            .canonicalize()
+            .context("locate BugParcel workspace Cargo.toml")?;
+        server.insert("command".into(), toml::Value::String("cargo".into()));
+        server.insert(
+            "args".into(),
+            toml::Value::Array(
+                [
+                    "run",
+                    "--quiet",
+                    "--manifest-path",
+                    manifest
+                        .to_str()
+                        .context("BugParcel workspace path is not UTF-8")?,
+                    "-p",
+                    "bugparcel-mcp",
+                ]
+                .into_iter()
+                .map(|value| toml::Value::String(value.into()))
+                .collect(),
+            ),
+        );
+    } else {
+        server.insert(
+            "command".into(),
+            toml::Value::String("bugparcel-mcp".into()),
+        );
+    }
+    server.insert(
+        "env".into(),
+        toml::Value::Table(toml::Table::from_iter([(
+            "BUGPARCEL_HOME".into(),
+            toml::Value::String(store.display().to_string()),
+        )])),
+    );
+    server.insert("startup_timeout_sec".into(), toml::Value::Integer(30));
+    server.insert("tool_timeout_sec".into(), toml::Value::Integer(120));
+    server.insert("required".into(), toml::Value::Boolean(true));
+    Ok(toml::Value::Table(server))
+}
+
+fn run_mcp_install(development: bool, store: Option<PathBuf>) -> Result<()> {
+    let repository = repository_root()?;
+    let store = store
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                repository.join(path)
+            }
+        })
+        .unwrap_or_else(|| repository.join(".bugparcel"));
+    fs::create_dir_all(&store)?;
+    let path = codex_config_path(&repository);
+    let mut config = read_codex_config(&path)?;
+    let servers = match config.entry("mcp_servers") {
+        toml::map::Entry::Vacant(entry) => entry.insert(toml::Value::Table(toml::Table::new())),
+        toml::map::Entry::Occupied(entry) => entry.into_mut(),
+    }
+    .as_table_mut()
+    .context("MCP_INSTALL_FAILED: mcp_servers must be a TOML table")?;
+    servers.insert(
+        "bugparcel".into(),
+        bugparcel_server_config(development, &store)?,
+    );
+    fs::create_dir_all(path.parent().expect(".codex parent"))?;
+    fs::write(&path, toml::to_string_pretty(&config)?)?;
+    println!("BugParcel MCP installed for {}", repository.display());
+    println!("Codex config: {}", path.display());
+    println!("Parcel store: {}", store.display());
+    println!("Run `bugparcel mcp doctor` before assigning an agent.");
+    Ok(())
+}
+
+fn run_mcp_doctor() -> Result<()> {
+    let repository = repository_root()?;
+    let path = codex_config_path(&repository);
+    let config = read_codex_config(&path)?;
+    if config
+        .get("mcp_servers")
+        .and_then(toml::Value::as_table)
+        .and_then(|servers| servers.get("bugparcel"))
+        .is_none()
+    {
+        anyhow::bail!("MCP_UNAVAILABLE: run `bugparcel mcp install` from this repository first");
+    }
+    let output = Command::new("codex")
+        .args(["mcp", "get", "bugparcel"])
+        .current_dir(&repository)
+        .output()
+        .context("ask Codex for BugParcel MCP configuration")?;
+    if !output.status.success() {
+        anyhow::bail!("MCP_UNAVAILABLE: run `bugparcel mcp install` from this repository first");
+    }
+    println!("MCP_DISCOVERABLE: {}", path.display());
+    Ok(())
 }
 fn manifest_path(root: &Path, id: &str) -> PathBuf {
     root.join("parcels").join(id).join("manifest.json")
@@ -282,6 +430,10 @@ fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let root = root();
     match cli.command {
+        Commands::Mcp { command } => match command {
+            McpCommands::Install { development, store } => run_mcp_install(development, store)?,
+            McpCommands::Doctor => run_mcp_doctor()?,
+        },
         Commands::Auth => {
             let request_id = format!(
                 "cli_{}_{}",

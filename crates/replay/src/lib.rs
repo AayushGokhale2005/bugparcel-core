@@ -32,7 +32,12 @@ pub fn run_with_environment(
         .command
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("reproduction command cannot be empty"))?;
-    let use_container = spec.environment.container_image.is_some() && docker_daemon_available();
+    let use_container = spec.environment.container_image.is_some();
+    if use_container && !docker_daemon_available() {
+        bail!(
+            "REPLAY_ENVIRONMENT_UNAVAILABLE: Docker is required by this parcel but its daemon is unavailable. Start Docker Desktop, wait for `docker info` to succeed, then retry BugParcel reproduction."
+        );
+    }
     let output = if use_container {
         let image = spec
             .environment
